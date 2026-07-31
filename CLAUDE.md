@@ -1,0 +1,162 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+@AGENTS.md
+
+## Commands
+
+```bash
+npm run dev       # start dev server on http://localhost:3000
+npm run build     # production build
+npm run lint      # ESLint (Next.js config, v9 flat config in eslint.config.mjs)
+```
+
+There is no test suite.
+
+## Architecture
+
+**GSO Inventory System** — office supplies inventory and issuance for LGU Ozamiz City,
+controlled by the General Services Office (GSO). Departments file supply requests
+(through the app or as walk-ins at the counter); GSO reviews, approves, and records the
+release, which draws down the requesting office's remaining balance.
+
+Cloned from the MTOP system (`github.com/berlcamp/mtop`) — same stack, layout, auth flow,
+and visual language.
+
+### Stack
+
+- **Next.js 16.2.3** with App Router and React 19. Read `node_modules/next/dist/docs/` before writing Next.js code — this version has breaking API changes.
+- **Supabase** (`@supabase/ssr`) for auth and database. All data lives in a custom `gso_inventory` Postgres schema; every Supabase query must call `.schema("gso_inventory")` before `.from(...)`. The schema must also be listed under **Project Settings → API → Exposed schemas**, otherwise every query fails with `The schema must be one of the following: …` — see `supabase/diagnostics/check_access.sql`.
+- **Tailwind v4** + **shadcn/ui** (style: `base-nova`, color: `neutral`, built on Base UI). Add new components with `npx shadcn add <component>`.
+- **Zod v4** for validation (`src/lib/schemas/gso.ts`).
+
+### The core model
+
+Each office carries a **remaining balance per item** for the fiscal year, seeded from the
+2026 "Inventory by Office" spreadsheet. A release deducts from that balance. GSO does not
+keep a separate central stock number — the per-office balance *is* the inventory.
+
+`gso_inventory.office_stocks` is one row per `(office, item, fiscal_year)`:
+- `opening_quantity` — the baseline loaded from the spreadsheet
+- `quantity` — what is left right now
+
+Every change to `quantity` writes a `gso_inventory.stock_movements` row (signed quantity +
+resulting balance). That ledger is the audit trail and the source for all issuance reporting.
+
+### Request flow
+
+`pending` → `approved` → `released`
+
+Side exits: `rejected`, `cancelled`. `partially_released` sits between approved and released
+when only some of the approved quantity has gone out.
+
+Walk-ins skip the queue: `create_walk_in_release` writes an already-approved request and
+releases it in the same transaction, tagged `source = 'walk_in'`.
+
+### Postgres functions (all `SECURITY DEFINER`)
+
+Stock never moves through a plain UPDATE — it always goes through an RPC so the balance
+change, the ledger row, and the status transition commit together.
+
+| Function | Purpose |
+|---|---|
+| `release_request(request_id, actor_id, lines, received_by, remarks)` | Deducts each line from the office balance, writes ledger rows, recomputes request status. Rejects over-release and insufficient balance. |
+| `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Replenishment, return, or manual correction. Signed quantity; refuses to go negative. |
+| `create_walk_in_release(office_id, actor_id, requester_name, purpose, lines, remarks)` | One-step counter issuance; delegates to `release_request`. |
+
+### Auth Flow
+
+Google OAuth only. There is **no `middleware.ts`** — session refresh runs through
+`src/proxy.ts` (exported as `proxy`, not `middleware`), picked up via the `config.matcher`
+export in that file.
+
+OAuth callback at `/auth/callback/route.ts`:
+1. Exchanges the code for a session.
+2. Looks up `gso_inventory.user_profiles` by `id`, then by `email` for pre-registered users.
+3. On first login of a pre-registered user, migrates the placeholder profile to the real auth UID using the admin client.
+4. Redirects unauthorized or deactivated users to `/auth?error=...` and signs them out.
+
+### Supabase Client Files
+
+| File | Usage |
+|---|---|
+| `src/lib/supabase/server.ts` | Server Components and Route Handlers — reads cookies via `next/headers` |
+| `src/lib/supabase/client.ts` | Client Components — singleton browser client |
+| `src/lib/supabase/admin.ts` | Server-only — service role key, bypasses RLS; validates JWT role on init |
+| `src/lib/supabase/proxy.ts` | Session refresh logic called by `src/proxy.ts` |
+
+### Data Layer
+
+All reads and mutations are **Server Actions** in `src/lib/actions/`:
+
+| File | Covers |
+|---|---|
+| `requests.ts` | Filing, approving, rejecting, cancelling, releasing, walk-ins |
+| `inventory.ts` | Office balances, stock ledger, adjustments |
+| `catalog.ts` | Offices, categories, units, items, item type-ahead |
+| `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
+| `reports.ts` | Issuance by office/category, trends, CSV exports |
+| `users.ts` | Admin user management (uses the admin client) |
+| `settings.ts` | System settings |
+
+Actions return `{ error: string | null, data: ... }` — never throw to the client.
+
+Every action starts with `requireSession()` or `requirePermission(...)` from
+`src/lib/auth/session.ts`, which resolves the profile and the effective permission codes.
+That module is deliberately **not** `"use server"` so it can export types and constants.
+
+### Permission scoping
+
+Authorization is enforced in server actions, not RLS (RLS gates access to authenticated
+users only). The key distinction is `request.view_all`:
+
+- Holders (admin, GSO head, GSO custodian) see and act on every office.
+- Without it, a supply officer is scoped to `profile.office_id` for requests, balances, ledger, and dashboard figures.
+
+Roles seeded in migration 2: `admin`, `gso_head`, `gso_custodian`, `supply_officer`.
+
+### Migrations
+
+`supabase/migrations/`, applied in order:
+
+1. `..._create_gso_inventory_schema.sql` — schema, tables, enums, RPCs, RLS, grants
+2. `..._seed_roles_permissions.sql` — roles and permissions
+3. `..._seed_baseline_inventory.sql` — **generated** from the 2026 CSV: 28 offices, 27 categories, 22 units, 390 items, 1,476 opening balances (30,079 units, reconciles to the sheet total)
+4. `..._super_admin_setup.sql` — first admin; drops the `user_profiles.id` FK to `auth.users` so placeholder profiles are allowed
+5. `..._seed_supply_officers.sql` — template: fill in each office's Google email
+
+### Types
+
+`src/types/database.ts` is hand-maintained. Regenerate with:
+```bash
+npx supabase gen types typescript --project-id <id> --schema gso_inventory > src/types/database.ts
+```
+
+### Component Structure
+
+- `src/components/ui/` — shadcn primitives (do not hand-edit)
+- `src/components/layout/` — `AppSidebar`, `Topbar`, `PageHeader`, `NavigationProgress`
+- `src/components/shared/` — `StatusBadge`, `MovementBadge`, `RequestStepper`, `TimelineLog`
+- `src/components/gso/` — `ItemLineEditor`, the item picker shared by the request and walk-in forms
+
+### Route Structure
+
+All authenticated routes live under `/dashboard`. The dashboard layout is a **Client
+Component** wrapping children in `ProfileProvider` + `SidebarProvider`.
+
+Page files (`page.tsx`) are Server Components that call server actions and pass data down;
+interactive logic lives in a sibling `*-content.tsx` / `*-form.tsx` Client Component. List
+filters are URL search params, so pages are `export const dynamic = "force-dynamic"`.
+
+### Environment Variables
+
+Required in `.env.local`:
+```
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=   # service_role JWT — used only in admin.ts
+```
+
+This project shares a Supabase project with MTOP; the schemas keep the data separate, but
+`auth.users` is common to both.
