@@ -1,33 +1,14 @@
+import { Suspense } from "react"
 import { PageHeader } from "@/components/layout/page-header"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { AlertCircle } from "lucide-react"
-import { getCategories, getItems, getUnits } from "@/lib/actions/catalog"
+import { getAllItems, getCategories, getUnits } from "@/lib/actions/catalog"
+import { DataTableSkeleton } from "@/components/tables/data-table-skeleton"
 import { ItemsContent } from "./items-content"
 
 export const dynamic = "force-dynamic"
 
-const PAGE_SIZE = 25
-
-export default async function ItemsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ search?: string; category?: string; page?: string }>
-}) {
-  const params = await searchParams
-  const page = Number(params.page ?? "1") || 1
-
-  const [itemsResult, categoriesResult, unitsResult] = await Promise.all([
-    getItems({
-      search: params.search,
-      categoryId: params.category,
-      activeOnly: false,
-      page,
-      pageSize: PAGE_SIZE,
-    }),
-    getCategories(),
-    getUnits(),
-  ])
-
+export default async function ItemsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
@@ -35,21 +16,34 @@ export default async function ItemsPage({
         subtitle="Supply catalog — categories, units, and reorder levels"
       />
 
-      {itemsResult.error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{itemsResult.error}</AlertDescription>
-        </Alert>
-      )}
-
-      <ItemsContent
-        rows={itemsResult.data.rows}
-        count={itemsResult.data.count}
-        categories={categoriesResult.data}
-        units={unitsResult.data}
-        page={page}
-        pageSize={PAGE_SIZE}
-      />
+      <Suspense fallback={<DataTableSkeleton columns={5} filters={3} />}>
+        <Results />
+      </Suspense>
     </div>
+  )
+}
+
+async function Results() {
+  const [itemsResult, categoriesResult, unitsResult] = await Promise.all([
+    getAllItems(),
+    getCategories(),
+    getUnits(),
+  ])
+
+  if (itemsResult.error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>{itemsResult.error}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  return (
+    <ItemsContent
+      rows={itemsResult.data}
+      categories={categoriesResult.data}
+      units={unitsResult.data}
+    />
   )
 }

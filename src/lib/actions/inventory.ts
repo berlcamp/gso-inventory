@@ -8,7 +8,6 @@ import {
   SCHEMA,
 } from "@/lib/auth/session"
 import { adjustStockSchema } from "@/lib/schemas/gso"
-import { getSystemSettings } from "@/lib/actions/settings"
 import type {
   ActionResult,
   OfficeStockRow,
@@ -29,83 +28,51 @@ const MOVEMENT_SELECT = `
   request:requests!request_id(id, request_no)
 `
 
-export async function getOfficeStocks(params: {
-  officeId?: string
-  categoryId?: string
-  search?: string
-  lowOnly?: boolean
-  page?: number
-  pageSize?: number
-}): Promise<ActionResult<{ rows: OfficeStockRow[]; count: number }>> {
+/**
+ * Every stock row the caller may see, unpaginated — the inventory table filters
+ * and pages in the browser. Bounded by one office × item row per fiscal year
+ * (1,476 for 2026), so this is a fixed, known size.
+ */
+export async function getAllOfficeStocks(): Promise<
+  ActionResult<OfficeStockRow[]>
+> {
   try {
     const ctx = await requirePermission("inventory.view")
-    const page = Math.max(1, params.page ?? 1)
-    const pageSize = params.pageSize ?? 25
 
     let query = ctx.supabase
       .schema(SCHEMA)
       .from("office_stocks")
-      .select(STOCK_SELECT, { count: "exact" })
-
-    // Without cross-office visibility a user only sees their own office.
-    if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) {
-        return { error: null, data: { rows: [], count: 0 } }
-      }
-      query = query.eq("office_id", ctx.profile.office_id)
-    } else if (params.officeId) {
-      query = query.eq("office_id", params.officeId)
-    }
-
-    if (params.categoryId) {
-      query = query.eq("item.category_id", params.categoryId)
-    }
-    if (params.search?.trim()) {
-      query = query.ilike("item.name", `%${params.search.trim()}%`)
-    }
-    // PostgREST returns null embeds for non-matching filtered relations —
-    // this keeps only the rows whose item actually matched.
-    if (params.categoryId || params.search?.trim()) {
-      query = query.not("item", "is", null)
-    }
-    if (params.lowOnly) {
-      const { data: settings } = await getSystemSettings()
-      query = query.lte("quantity", settings.low_stock_threshold)
-    }
-
-    const from = (page - 1) * pageSize
-    query = query
+      .select(STOCK_SELECT)
       .order("quantity", { ascending: true })
-      .range(from, from + pageSize - 1)
 
-    const { data, count, error } = await query
-    if (error) return { error: error.message, data: { rows: [], count: 0 } }
-
-    return {
-      error: null,
-      data: {
-        rows: (data ?? []) as unknown as OfficeStockRow[],
-        count: count ?? 0,
-      },
+    if (!ctx.canViewAll) {
+      if (!ctx.profile.office_id) return { error: null, data: [] }
+      query = query.eq("office_id", ctx.profile.office_id)
     }
+
+    const { data, error } = await query
+    if (error) return { error: error.message, data: [] }
+    return { error: null, data: (data ?? []) as unknown as OfficeStockRow[] }
   } catch (e) {
-    return { error: toError(e), data: { rows: [], count: 0 } }
+    return { error: toError(e), data: [] }
   }
 }
 
-export async function getStockMovements(params: {
-  officeId?: string
-  itemId?: string
-  movementType?: string
-  from?: string
-  to?: string
-  page?: number
-  pageSize?: number
-}): Promise<ActionResult<{ rows: StockMovementRow[]; count: number }>> {
+/**
+ * The ledger grows with every release, so unlike the other tables it cannot be
+ * loaded whole. Returns the most recent `MOVEMENT_FETCH_LIMIT` rows plus the
+ * true total, and the page tells the user when it is showing a slice.
+ */
+// Not exported: a "use server" file may only export async functions. The
+// effective limit travels back to the caller in the result payload instead.
+const MOVEMENT_FETCH_LIMIT = 5000
+
+export async function getAllStockMovements(): Promise<
+  ActionResult<{ rows: StockMovementRow[]; total: number; limit: number }>
+> {
+  const empty = { rows: [], total: 0, limit: MOVEMENT_FETCH_LIMIT }
   try {
     const ctx = await requirePermission("inventory.view")
-    const page = Math.max(1, params.page ?? 1)
-    const pageSize = params.pageSize ?? 25
 
     let query = ctx.supabase
       .schema(SCHEMA)
@@ -114,36 +81,26 @@ export async function getStockMovements(params: {
       .order("created_at", { ascending: false })
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) {
-        return { error: null, data: { rows: [], count: 0 } }
-      }
+      if (!ctx.profile.office_id) return { error: null, data: empty }
       query = query.eq("office_id", ctx.profile.office_id)
-    } else if (params.officeId) {
-      query = query.eq("office_id", params.officeId)
     }
 
-    if (params.itemId) query = query.eq("item_id", params.itemId)
-    if (params.movementType && params.movementType !== "all") {
-      query = query.eq("movement_type", params.movementType)
-    }
-    if (params.from) query = query.gte("created_at", params.from)
-    if (params.to) query = query.lte("created_at", `${params.to}T23:59:59.999Z`)
-
-    const from = (page - 1) * pageSize
-    query = query.range(from, from + pageSize - 1)
-
-    const { data, count, error } = await query
-    if (error) return { error: error.message, data: { rows: [], count: 0 } }
+    const { data, count, error } = await query.range(
+      0,
+      MOVEMENT_FETCH_LIMIT - 1
+    )
+    if (error) return { error: error.message, data: empty }
 
     return {
       error: null,
       data: {
         rows: (data ?? []) as unknown as StockMovementRow[],
-        count: count ?? 0,
+        total: count ?? 0,
+        limit: MOVEMENT_FETCH_LIMIT,
       },
     }
   } catch (e) {
-    return { error: toError(e), data: { rows: [], count: 0 } }
+    return { error: toError(e), data: empty }
   }
 }
 

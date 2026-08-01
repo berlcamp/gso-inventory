@@ -14,7 +14,6 @@ import {
 import type {
   ActionResult,
   RequestLogRow,
-  RequestStatus,
   SupplyRequestRow,
 } from "@/types/database"
 
@@ -40,60 +39,33 @@ const REQUEST_DETAIL_SELECT = `
 
 /* ── Reads ─────────────────────────────────────────────────────────────── */
 
-export async function getRequests(params: {
-  status?: string
-  officeId?: string
-  search?: string
-  page?: number
-  pageSize?: number
-}): Promise<ActionResult<{ rows: SupplyRequestRow[]; count: number }>> {
+/**
+ * Every request the caller may see, unpaginated — the requests table filters in
+ * the browser. Grows over a fiscal year but stays in the low thousands: one row
+ * per requisition slip, not per line item.
+ */
+export async function getAllRequests(): Promise<
+  ActionResult<SupplyRequestRow[]>
+> {
   try {
     const ctx = await requireSession()
-    const page = Math.max(1, params.page ?? 1)
-    const pageSize = params.pageSize ?? 20
 
     let query = ctx.supabase
       .schema(SCHEMA)
       .from("requests")
-      .select(REQUEST_SELECT, { count: "exact" })
+      .select(REQUEST_SELECT)
       .order("requested_at", { ascending: false })
 
-    // Supply officers only ever see their own office's requests.
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) {
-        return { error: null, data: { rows: [], count: 0 } }
-      }
+      if (!ctx.profile.office_id) return { error: null, data: [] }
       query = query.eq("office_id", ctx.profile.office_id)
-    } else if (params.officeId) {
-      query = query.eq("office_id", params.officeId)
     }
 
-    if (params.status && params.status !== "all") {
-      query = query.eq("status", params.status as RequestStatus)
-    }
-
-    if (params.search?.trim()) {
-      const term = params.search.trim()
-      query = query.or(
-        `request_no.ilike.%${term}%,purpose.ilike.%${term}%,requester_name.ilike.%${term}%`
-      )
-    }
-
-    const from = (page - 1) * pageSize
-    query = query.range(from, from + pageSize - 1)
-
-    const { data, count, error } = await query
-    if (error) return { error: error.message, data: { rows: [], count: 0 } }
-
-    return {
-      error: null,
-      data: {
-        rows: (data ?? []) as unknown as SupplyRequestRow[],
-        count: count ?? 0,
-      },
-    }
+    const { data, error } = await query
+    if (error) return { error: error.message, data: [] }
+    return { error: null, data: (data ?? []) as unknown as SupplyRequestRow[] }
   } catch (e) {
-    return { error: toError(e), data: { rows: [], count: 0 } }
+    return { error: toError(e), data: [] }
   }
 }
 

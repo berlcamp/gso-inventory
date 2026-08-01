@@ -1,7 +1,6 @@
 "use client"
 
 import { useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
   Card,
@@ -37,7 +36,15 @@ import {
   type MonthlyTrend,
   type OfficeIssuance,
 } from "@/lib/actions/reports"
+import { useFilterNav } from "@/lib/hooks/use-filter-nav"
 import type { Office, RequestStatus } from "@/types/database"
+
+/** Keys double as the search-param names — see `useFilterNav`. */
+export type ReportFilterValues = {
+  office: string
+  from: string
+  to: string
+}
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -78,6 +85,7 @@ export function ReportsContent({
   trends,
   statusCounts,
   offices,
+  filters,
   fiscalYear,
 }: {
   byOffice: OfficeIssuance[]
@@ -85,24 +93,15 @@ export function ReportsContent({
   trends: MonthlyTrend[]
   statusCounts: Record<RequestStatus, number>
   offices: Office[]
+  filters: ReportFilterValues
   fiscalYear: number
 }) {
-  const router = useRouter()
-  const searchParams = useSearchParams()
   const [exporting, setExporting] = useState<"stock" | "movements" | null>(null)
-
-  const from = searchParams.get("from") ?? ""
-  const to = searchParams.get("to") ?? ""
-  const office = searchParams.get("office") ?? ""
-
-  function updateParams(updates: Record<string, string>) {
-    const params = new URLSearchParams(searchParams.toString())
-    for (const [key, value] of Object.entries(updates)) {
-      if (value) params.set(key, value)
-      else params.delete(key)
-    }
-    router.push(`/dashboard/reports?${params.toString()}`)
-  }
+  const { draft, isPending, apply, applyDebounced } = useFilterNav(
+    "/dashboard/reports",
+    filters
+  )
+  const { from, to, office } = draft
 
   const officeOptions = [
     { label: "All offices", value: "__all" },
@@ -178,7 +177,7 @@ export function ReportsContent({
               items={officeOptions}
               value={office || "__all"}
               onValueChange={(value) =>
-                updateParams({ office: value === "__all" ? "" : (value as string) })
+                apply({ office: value === "__all" ? "" : (value as string) })
               }
             >
               <SelectTrigger className="h-8 w-[200px]">
@@ -205,7 +204,7 @@ export function ReportsContent({
               id="report-from"
               type="date"
               value={from}
-              onChange={(e) => updateParams({ from: e.target.value })}
+              onChange={(e) => applyDebounced({ from: e.target.value })}
               className="h-8 w-[150px]"
             />
           </div>
@@ -221,7 +220,7 @@ export function ReportsContent({
               id="report-to"
               type="date"
               value={to}
-              onChange={(e) => updateParams({ to: e.target.value })}
+              onChange={(e) => applyDebounced({ to: e.target.value })}
               className="h-8 w-[150px]"
             />
           </div>
@@ -230,7 +229,7 @@ export function ReportsContent({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => updateParams({ from: "", to: "", office: "" })}
+              onClick={() => apply({ from: "", to: "", office: "" })}
             >
               Clear
             </Button>
@@ -269,6 +268,13 @@ export function ReportsContent({
         </div>
       </div>
 
+      {/* Figures fade while a filter change is in flight, so it is obvious the
+          numbers on screen are still the previous filter's. */}
+      <div
+        className={`space-y-6 transition-opacity ${
+          isPending ? "pointer-events-none opacity-50" : ""
+        }`}
+      >
       {/* Highlight cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
@@ -563,6 +569,7 @@ export function ReportsContent({
             </Table>
           </CardContent>
         </Card>
+      </div>
       </div>
     </div>
   )

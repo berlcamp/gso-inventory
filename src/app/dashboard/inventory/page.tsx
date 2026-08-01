@@ -1,43 +1,16 @@
+import { Suspense } from "react"
 import { PageHeader } from "@/components/layout/page-header"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { AlertCircle } from "lucide-react"
-import { getOfficeStocks } from "@/lib/actions/inventory"
+import { getAllOfficeStocks } from "@/lib/actions/inventory"
 import { getCategories, getOffices } from "@/lib/actions/catalog"
 import { getSystemSettings } from "@/lib/actions/settings"
-import { InventoryContent } from "./inventory-content"
+import { DataTableSkeleton } from "@/components/tables/data-table-skeleton"
+import { InventoryTable } from "./inventory-table"
 
 export const dynamic = "force-dynamic"
 
-const PAGE_SIZE = 25
-
-export default async function InventoryPage({
-  searchParams,
-}: {
-  searchParams: Promise<{
-    office?: string
-    category?: string
-    search?: string
-    low?: string
-    page?: string
-  }>
-}) {
-  const params = await searchParams
-  const page = Number(params.page ?? "1") || 1
-
-  const [stocksResult, officesResult, categoriesResult, settingsResult] = await Promise.all([
-    getOfficeStocks({
-      officeId: params.office,
-      categoryId: params.category,
-      search: params.search,
-      lowOnly: params.low === "1",
-      page,
-      pageSize: PAGE_SIZE,
-    }),
-    getOffices(),
-    getCategories(),
-    getSystemSettings(),
-  ])
-
+export default async function InventoryPage() {
   return (
     <div className="space-y-6">
       <PageHeader
@@ -45,22 +18,39 @@ export default async function InventoryPage({
         subtitle="Remaining supply balance per office for the fiscal year"
       />
 
-      {stocksResult.error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{stocksResult.error}</AlertDescription>
-        </Alert>
-      )}
-
-      <InventoryContent
-        rows={stocksResult.data.rows}
-        count={stocksResult.data.count}
-        offices={officesResult.data}
-        categories={categoriesResult.data}
-        lowStockThreshold={settingsResult.data.low_stock_threshold}
-        page={page}
-        pageSize={PAGE_SIZE}
-      />
+      {/* Nothing is awaited above the boundary, so the header paints straight
+          away while the rows load. Filtering happens in the browser from here. */}
+      <Suspense fallback={<DataTableSkeleton columns={7} filters={3} />}>
+        <Results />
+      </Suspense>
     </div>
+  )
+}
+
+async function Results() {
+  const [stocksResult, officesResult, categoriesResult, settingsResult] =
+    await Promise.all([
+      getAllOfficeStocks(),
+      getOffices(),
+      getCategories(),
+      getSystemSettings(),
+    ])
+
+  if (stocksResult.error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>{stocksResult.error}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  return (
+    <InventoryTable
+      rows={stocksResult.data}
+      offices={officesResult.data}
+      categories={categoriesResult.data}
+      lowStockThreshold={settingsResult.data.low_stock_threshold}
+    />
   )
 }

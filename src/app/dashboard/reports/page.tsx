@@ -8,7 +8,7 @@ import {
   getRequestStatusCounts,
 } from "@/lib/actions/reports"
 import { getOffices } from "@/lib/actions/catalog"
-import { ReportsContent } from "./reports-content"
+import { ReportsContent, type ReportFilterValues } from "./reports-content"
 
 export const dynamic = "force-dynamic"
 
@@ -19,17 +19,22 @@ export default async function ReportsPage({
 }) {
   const params = await searchParams
   const fiscalYear = new Date().getFullYear()
-  const filters = {
-    from: params.from,
-    to: params.to,
-    officeId: params.office,
+  const filters: ReportFilterValues = {
+    office: params.office ?? "",
+    from: params.from ?? "",
+    to: params.to ?? "",
+  }
+  const query = {
+    from: filters.from || undefined,
+    to: filters.to || undefined,
+    officeId: filters.office || undefined,
   }
 
   const [byOffice, byCategory, trends, statusCounts, offices] = await Promise.all([
-    getIssuanceByOffice(filters),
-    getIssuanceByCategory(filters),
+    getIssuanceByOffice(query),
+    getIssuanceByCategory(query),
     getMonthlyTrends(fiscalYear),
-    getRequestStatusCounts(filters),
+    getRequestStatusCounts(query),
     getOffices(),
   ])
 
@@ -56,6 +61,7 @@ export default async function ReportsPage({
         trends={trends.data}
         statusCounts={statusCounts.data}
         offices={offices.data}
+        filters={filters}
         fiscalYear={fiscalYear}
       />
     </div>

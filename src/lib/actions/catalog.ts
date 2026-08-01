@@ -63,45 +63,21 @@ export async function getUnits(): Promise<ActionResult<Unit[]>> {
   }
 }
 
-export async function getItems(params: {
-  search?: string
-  categoryId?: string
-  activeOnly?: boolean
-  page?: number
-  pageSize?: number
-}): Promise<ActionResult<{ rows: ItemWithRefs[]; count: number }>> {
+/** The whole catalog, unpaginated — the items table filters in the browser. */
+export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
   try {
     const ctx = await requireSession()
-    const page = Math.max(1, params.page ?? 1)
-    const pageSize = params.pageSize ?? 25
 
-    let query = ctx.supabase
+    const { data, error } = await ctx.supabase
       .schema(SCHEMA)
       .from("items")
-      .select(ITEM_SELECT, { count: "exact" })
+      .select(ITEM_SELECT)
       .order("name")
 
-    if (params.activeOnly !== false) query = query.eq("is_active", true)
-    if (params.categoryId) query = query.eq("category_id", params.categoryId)
-    if (params.search?.trim()) {
-      query = query.ilike("name", `%${params.search.trim()}%`)
-    }
-
-    const from = (page - 1) * pageSize
-    query = query.range(from, from + pageSize - 1)
-
-    const { data, count, error } = await query
-    if (error) return { error: error.message, data: { rows: [], count: 0 } }
-
-    return {
-      error: null,
-      data: {
-        rows: (data ?? []) as unknown as ItemWithRefs[],
-        count: count ?? 0,
-      },
-    }
+    if (error) return { error: error.message, data: [] }
+    return { error: null, data: (data ?? []) as unknown as ItemWithRefs[] }
   } catch (e) {
-    return { error: toError(e), data: { rows: [], count: 0 } }
+    return { error: toError(e), data: [] }
   }
 }
 

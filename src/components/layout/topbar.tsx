@@ -93,7 +93,8 @@ export function Topbar() {
   const displayName = profile?.full_name || user?.email || "User"
   const displayEmail = profile?.email || user?.email || ""
   const initials = getInitials(displayName)
-  const avatarUrl = profile?.avatar_url || user?.user_metadata?.avatar_url
+  const avatarUrl =
+    profile?.avatar_url || user?.user_metadata?.avatar_url || undefined
 
   const shortName =
     displayName.length > 22 ? displayName.slice(0, 20) + "…" : displayName

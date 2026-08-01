@@ -48,7 +48,8 @@ export function AccountContent() {
   }
 
   const displayName = profile?.full_name ?? user?.email ?? "User"
-  const avatarUrl = profile?.avatar_url ?? user?.user_metadata?.avatar_url
+  const avatarUrl =
+    profile?.avatar_url ?? user?.user_metadata?.avatar_url ?? undefined
 
   return (
     <div className="grid max-w-4xl gap-5 lg:grid-cols-3">

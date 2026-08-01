@@ -106,6 +106,11 @@ Every action starts with `requireSession()` or `requirePermission(...)` from
 `src/lib/auth/session.ts`, which resolves the profile and the effective permission codes.
 That module is deliberately **not** `"use server"` so it can export types and constants.
 
+`requireSession` is wrapped in React `cache()`, so the auth chain (`auth.getUser()` plus
+one profile query and one nested roles→permissions query) runs **once per request** no
+matter how many actions a page awaits. Do not unwrap it — a page calling four actions
+would go back to paying for four auth round trips before fetching any real data.
+
 ### Permission scoping
 
 Authorization is enforced in server actions, not RLS (RLS gates access to authenticated
@@ -135,19 +140,65 @@ npx supabase gen types typescript --project-id <id> --schema gso_inventory > src
 
 ### Component Structure
 
-- `src/components/ui/` — shadcn primitives (do not hand-edit)
+- `src/components/ui/` — shadcn primitives (do not hand-edit, with one exception below)
 - `src/components/layout/` — `AppSidebar`, `Topbar`, `PageHeader`, `NavigationProgress`
 - `src/components/shared/` — `StatusBadge`, `MovementBadge`, `RequestStepper`, `TimelineLog`
+- `src/components/tables/` — the TanStack `DataTable` and its toolbar, faceted filter, pagination, sortable header, skeleton, and CSV export
 - `src/components/gso/` — `ItemLineEditor`, the item picker shared by the request and walk-in forms
+
+**Local edit to the primitives:** `Input`, `Textarea`, and `SelectTrigger` were changed
+from `bg-transparent` to `bg-card` so form fields read as white against this theme's grey
+page background (`--background` is #F0F2F5; `--card` is the white surface — `bg-background`
+would be the *grey*). The `dark:bg-input/30` fill is untouched, because `bg-card` in dark
+mode is the panel colour and a field would disappear into it. Re-running
+`npx shadcn add input|textarea|select` reverts this — reapply it after.
 
 ### Route Structure
 
-All authenticated routes live under `/dashboard`. The dashboard layout is a **Client
-Component** wrapping children in `ProfileProvider` + `SidebarProvider`.
+All authenticated routes live under `/dashboard`. The dashboard layout is a **Server
+Component**: it resolves `getSessionSnapshot()` once and hands it to `SessionProvider`
+(`src/lib/hooks/use-session.tsx`), which backs `useAuth`, `useProfile`, and
+`usePermissions`. Those hooks do **no** fetching — permission checks are correct on the
+first render, and adding a call site costs nothing.
 
 Page files (`page.tsx`) are Server Components that call server actions and pass data down;
-interactive logic lives in a sibling `*-content.tsx` / `*-form.tsx` Client Component. List
-filters are URL search params, so pages are `export const dynamic = "force-dynamic"`.
+interactive logic lives in a sibling `*-content.tsx` / `*-form.tsx` Client Component. Pages
+are `export const dynamic = "force-dynamic"`.
+
+Each list page awaits nothing above its `<Suspense>` boundary, so the header paints
+immediately and the rows stream in behind a `<DataTableSkeleton />`. Every list route also
+has a `loading.tsx` for arriving from another route.
+
+### List pages
+
+Inventory, requests, movements, and items are **client-side tables**
+(`src/components/tables/data-table.tsx`, TanStack Table). The page fetches *every* row it
+is allowed to see via a `getAllX()` action and hands it over; filtering, sorting, and
+paging then happen in the browser with no server round trip.
+
+Filters are the faceted style: a dashed-outline trigger, a searchable checklist, and live
+per-option counts from the faceted row model. They are **multi-select** — the filter value
+is a `string[]`, so any filterable column needs
+`filterFn: (row, id, value) => value.includes(row.getValue(id))`. Filter state lives in the
+component, not the URL, so list pages are no longer linkable to a filtered view.
+
+Columns filter on **ids** but sort and display **names** (`accessorFn` returns
+`row.office?.id`, with an explicit `sortingFn` comparing codes). Filter options come from
+the full lookup tables, not from the loaded rows, so an empty result still shows why. A
+column that only exists to be filtered on (stock level, request source) is hidden through
+`initialColumnVisibility` — hidden columns still filter and facet.
+
+Two constraints worth keeping in mind:
+
+- **Column definitions contain functions**, so they can only be built inside a Client
+  Component. Passing them from a `page.tsx` fails at runtime with "Functions cannot be
+  passed directly to Client Components".
+- **`getAllStockMovements` is capped** at 5,000 rows because the ledger grows with every
+  release, unlike the other tables. The page renders a notice when it is showing a slice.
+  If the ledger routinely exceeds this, that page needs to go back to server-side paging.
+
+Reports still filters server-side through `useFilterNav` (`src/lib/hooks/use-filter-nav.ts`),
+because its figures are aggregated in SQL rather than derived from rows in the browser.
 
 ### Environment Variables
 
