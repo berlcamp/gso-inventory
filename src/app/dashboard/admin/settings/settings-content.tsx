@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { AlertCircle, Loader2, Save } from "lucide-react"
 import { updateSystemSettings, type SystemSettings } from "@/lib/actions/settings"
@@ -21,6 +22,9 @@ export function SettingsContent({ settings }: { settings: SystemSettings }) {
   const router = useRouter()
   const [fiscalYear, setFiscalYear] = useState(String(settings.fiscal_year))
   const [lowStock, setLowStock] = useState(String(settings.low_stock_threshold))
+  const [allowOverRelease, setAllowOverRelease] = useState(
+    settings.allow_over_release
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -32,6 +36,7 @@ export function SettingsContent({ settings }: { settings: SystemSettings }) {
     const result = await updateSystemSettings({
       fiscal_year: Number(fiscalYear),
       low_stock_threshold: Number(lowStock),
+      allow_over_release: allowOverRelease,
     })
 
     setSubmitting(false)
@@ -101,6 +106,44 @@ export function SettingsContent({ settings }: { settings: SystemSettings }) {
               Balances at or below this level are flagged on the dashboard and
               the inventory list.
             </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Issuance</CardTitle>
+          <CardDescription>
+            How strictly the counter is held to each office&apos;s allocation.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-start gap-3">
+            <Checkbox
+              id="allow-over-release"
+              checked={allowOverRelease}
+              onCheckedChange={(checked) => setAllowOverRelease(checked === true)}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label
+                htmlFor="allow-over-release"
+                className="text-sm font-medium"
+              >
+                Allow releasing beyond the remaining balance
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Off: a request cannot be filed, approved, or released for more
+                than the office has left, and the balance can never go negative.
+                On: those limits are waived and a release may drive the balance
+                below zero — the ledger still records every movement, so the
+                overdraw is visible on the stock ledger and in reports.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Either way, an office can only ever draw items it actually holds
+                an allocation for.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>

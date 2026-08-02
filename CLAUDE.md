@@ -61,9 +61,41 @@ change, the ledger row, and the status transition commit together.
 
 | Function | Purpose |
 |---|---|
-| `release_request(request_id, actor_id, lines, received_by, remarks)` | Deducts each line from the office balance, writes ledger rows, recomputes request status. Rejects over-release and insufficient balance. |
+| `release_request(request_id, actor_id, lines, received_by, remarks)` | Deducts each line from the office balance, writes ledger rows, recomputes request status. Rejects releasing more than was approved, and — unless `allow_over_release` is on — more than the balance. |
 | `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Replenishment, return, or manual correction. Signed quantity; refuses to go negative. |
 | `create_walk_in_release(office_id, actor_id, requester_name, purpose, lines, remarks)` | One-step counter issuance; delegates to `release_request`. |
+
+### Balance enforcement
+
+An office can only ever draw items **it holds an allocation for**, and only from
+**its own** `office_stocks` row — `release_request` takes the office id from the request
+row, never from caller input, so there is no path to another office's balance.
+
+The quantity limit is checked in three places, and they must agree:
+
+| Where | Checks against |
+|---|---|
+| `createRequest` | `balance - committed` |
+| `approveRequest` | `balance - committed`, excluding the request being approved |
+| `release_request` (RPC) | raw `balance` |
+
+`committed` is what other **approved but not yet collected** requests have spoken for.
+Without subtracting it, two requests could each be approved for the whole balance and the
+second would only fail at the counter. `loadAvailability()` in `requests.ts` computes it;
+`getRequestAvailability()` exposes the same arithmetic to the approve screen so the number
+on screen matches what submitting will enforce. The release dialog deliberately caps on
+raw `balance` instead, mirroring the RPC — a request must not be blocked by its own
+commitment.
+
+**`allow_over_release`** (admin → settings) waives the quantity ceiling in all three
+places, letting a balance go negative; the ledger still records every movement. It never
+waives the allocation requirement — a missing `office_stocks` row is still an error, since
+creating one would invent an allocation no fiscal-year baseline granted.
+
+The fiscal year for a new request comes from `system_settings`, not the wall clock, and is
+written onto the request explicitly. `office_stocks` is keyed by fiscal year and the RPC
+reads the year back off the request, so validating against a different year than the row
+receives would let a bad line through.
 
 ### Auth Flow
 
@@ -130,6 +162,7 @@ Roles seeded in migration 2: `admin`, `gso_head`, `gso_custodian`, `supply_offic
 3. `..._seed_baseline_inventory.sql` — **generated** from the 2026 CSV: 28 offices, 27 categories, 22 units, 390 items, 1,476 opening balances (30,079 units, reconciles to the sheet total)
 4. `..._super_admin_setup.sql` — first admin; drops the `user_profiles.id` FK to `auth.users` so placeholder profiles are allowed
 5. `..._seed_supply_officers.sql` — template: fill in each office's Google email
+6. `..._release_request_honor_over_release.sql` — replaces `release_request` so it reads the `allow_over_release` setting instead of always refusing an over-balance release
 
 ### Types
 

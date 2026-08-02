@@ -51,7 +51,11 @@ import {
   releaseRequest,
   cancelRequest,
 } from "@/lib/actions/requests"
-import type { RequestLogRow, SupplyRequestRow } from "@/types/database"
+import type {
+  ItemAvailability,
+  RequestLogRow,
+  SupplyRequestRow,
+} from "@/types/database"
 
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -67,11 +71,11 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
 export function RequestDetail({
   request,
   logs,
-  balances,
+  availability,
 }: {
   request: SupplyRequestRow
   logs: RequestLogRow[]
-  balances: Record<string, number>
+  availability: Record<string, ItemAvailability>
 }) {
   const router = useRouter()
   const { can } = usePermissions()
@@ -101,7 +105,7 @@ export function RequestDetail({
                 <>
                   <ApproveDialog
                     request={request}
-                    balances={balances}
+                    availability={availability}
                     onDone={() => router.refresh()}
                     onError={setError}
                   />
@@ -115,7 +119,7 @@ export function RequestDetail({
               {isReleasable && can("request.release") && (
                 <ReleaseDialog
                   request={request}
-                  balances={balances}
+                  availability={availability}
                   onDone={() => router.refresh()}
                   onError={setError}
                 />
@@ -246,7 +250,7 @@ export function RequestDetail({
                       {Number(line.quantity_released).toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {(balances[line.item_id] ?? 0).toLocaleString()}
+                      {(availability[line.item_id]?.balance ?? 0).toLocaleString()}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -275,12 +279,12 @@ export function RequestDetail({
 
 function ApproveDialog({
   request,
-  balances,
+  availability,
   onDone,
   onError,
 }: {
   request: SupplyRequestRow
-  balances: Record<string, number>
+  availability: Record<string, ItemAvailability>
   onDone: () => void
   onError: (message: string) => void
 }) {
@@ -331,7 +335,11 @@ function ApproveDialog({
 
         <div className="max-h-[45vh] space-y-3 overflow-y-auto py-4">
           {lines.map((line) => {
-            const available = balances[line.item_id] ?? 0
+            const stock = availability[line.item_id]
+            // Approving is a promise, so it is capped by what other approved
+            // requests have not already spoken for.
+            const available = stock?.available ?? 0
+            const committed = stock?.committed ?? 0
             const value = Number(quantities[line.id] ?? 0)
             return (
               <div
@@ -344,8 +352,18 @@ function ApproveDialog({
                   </p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     Requested {Number(line.quantity_requested).toLocaleString()}{" "}
-                    {line.item?.unit?.code} · {available.toLocaleString()} remaining
+                    {line.item?.unit?.code} · {available.toLocaleString()}{" "}
+                    available
                   </p>
+                  {committed > 0 && (
+                    // Without this the number looks wrong: the ledger says one
+                    // thing, the approvable figure another.
+                    <p className="mt-0.5 text-[11px] text-amber-700">
+                      {(stock?.balance ?? 0).toLocaleString()} in balance, but{" "}
+                      {committed.toLocaleString()} is already approved for
+                      release on other requests
+                    </p>
+                  )}
                 </div>
                 <div className="w-24 shrink-0">
                   <Input
@@ -467,12 +485,12 @@ function RejectDialog({
 
 function ReleaseDialog({
   request,
-  balances,
+  availability,
   onDone,
   onError,
 }: {
   request: SupplyRequestRow
-  balances: Record<string, number>
+  availability: Record<string, ItemAvailability>
   onDone: () => void
   onError: (message: string) => void
 }) {
@@ -488,7 +506,7 @@ function ReleaseDialog({
         const outstanding =
           Number(l.quantity_approved ?? l.quantity_requested) -
           Number(l.quantity_released)
-        const available = balances[l.item_id] ?? 0
+        const available = availability[l.item_id]?.balance ?? 0
         return [l.id, Math.min(outstanding, available)]
       })
     )
@@ -553,7 +571,11 @@ function ReleaseDialog({
             const outstanding =
               Number(line.quantity_approved ?? line.quantity_requested) -
               Number(line.quantity_released)
-            const available = balances[line.item_id] ?? 0
+            // Issuing is capped by the raw balance, not by `available`:
+            // `release_request` checks the allocation row itself, and this
+            // request's own approved quantity is part of what other requests
+            // see as committed. Capping lower here would block a valid release.
+            const available = availability[line.item_id]?.balance ?? 0
             const value = Number(quantities[line.id] ?? 0)
             const invalid = value > outstanding || value > available
 

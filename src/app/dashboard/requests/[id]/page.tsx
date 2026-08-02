@@ -1,6 +1,10 @@
 import { notFound } from "next/navigation"
 import { PageHeader } from "@/components/layout/page-header"
-import { getRequest, getRequestLogs, getOfficeBalances } from "@/lib/actions/requests"
+import {
+  getRequest,
+  getRequestLogs,
+  getRequestAvailability,
+} from "@/lib/actions/requests"
 import { RequestDetail } from "./request-detail"
 
 export const dynamic = "force-dynamic"
@@ -25,9 +29,9 @@ export default async function RequestDetailPage({
   }
 
   const request = requestResult.data
-  const [logsResult, balancesResult] = await Promise.all([
+  const [logsResult, availabilityResult] = await Promise.all([
     getRequestLogs(id),
-    getOfficeBalances(request.office_id),
+    getRequestAvailability(id),
   ])
 
   return (
@@ -39,7 +43,7 @@ export default async function RequestDetailPage({
       <RequestDetail
         request={request}
         logs={logsResult.data}
-        balances={balancesResult.data}
+        availability={availabilityResult.data}
       />
     </div>
   )

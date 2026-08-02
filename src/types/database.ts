@@ -219,3 +219,19 @@ export type UserProfileRow = UserProfile & {
 /* ── Action result envelope — actions never throw to the client ────────── */
 
 export type ActionResult<T = null> = { error: string | null; data: T }
+
+/**
+ * What an office can still draw of one item, split so the UI can show the
+ * right number in the right place:
+ *
+ * - `balance`    — the allocation row's remaining quantity. This is what
+ *                  `release_request` checks, so it is the cap when issuing.
+ * - `committed`  — approved but not yet collected on the office's *other*
+ *                  open requests.
+ * - `available`  — `balance - committed`; what approving can safely promise.
+ */
+export interface ItemAvailability {
+  balance: number
+  committed: number
+  available: number
+}
