@@ -81,16 +81,30 @@ The quantity limit is checked in three places, and they must agree:
 
 `committed` is what other **approved but not yet collected** requests have spoken for.
 Without subtracting it, two requests could each be approved for the whole balance and the
-second would only fail at the counter. `loadAvailability()` in `requests.ts` computes it;
-`getRequestAvailability()` exposes the same arithmetic to the approve screen so the number
-on screen matches what submitting will enforce. The release dialog deliberately caps on
-raw `balance` instead, mirroring the RPC — a request must not be blocked by its own
+second would only fail at the counter. `loadAvailability()` in
+`src/lib/inventory/availability.ts` computes it — that module is plain functions, not
+`"use server"`, so both the write paths and the item picker can share one arithmetic.
+`getRequestAvailability()` exposes the same numbers to the approve screen so what is on
+screen matches what submitting will enforce. The release dialog deliberately caps on raw
+`balance` instead, mirroring the RPC — a request must not be blocked by its own
 commitment.
 
+**The picker never offers what the checks would reject.** `searchItemsForOffice()` reads
+the office's own `office_stocks` rows for the settings fiscal year rather than the
+catalog, so an item the office holds no allocation for — or has nothing left of — is not
+in the list at all. Its ceiling is mode-dependent, matching the check downstream:
+`balance - committed` for `request`, raw `balance` for `walk_in`. An empty query lists the
+office's whole shelf, which is now a useful size.
+
+Stock adjustments are the deliberate exception and use `searchCatalogForOffice()` instead:
+`adjust_stock` opens an allocation row for an item the office has never carried, so
+replenishing is exactly the case where "the office has none of it" must not hide the item.
+
 **`allow_over_release`** (admin → settings) waives the quantity ceiling in all three
-places, letting a balance go negative; the ledger still records every movement. It never
-waives the allocation requirement — a missing `office_stocks` row is still an error, since
-creating one would invent an allocation no fiscal-year baseline granted.
+places, letting a balance go negative; the ledger still records every movement, and the
+picker widens back to the office's full allocation so a zeroed item can still be put on a
+slip. It never waives the allocation requirement — a missing `office_stocks` row is still
+an error, since creating one would invent an allocation no fiscal-year baseline granted.
 
 The fiscal year for a new request comes from `system_settings`, not the wall clock, and is
 written onto the request explicitly. `office_stocks` is keyed by fiscal year and the RPC
@@ -133,6 +147,10 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 | `settings.ts` | System settings |
 
 Actions return `{ error: string | null, data: ... }` — never throw to the client.
+
+Logic shared *between* action files goes in `src/lib/inventory/` (currently
+`availability.ts`), not in one action file imported by another — a `"use server"` module
+may only export async functions, so a helper living there cannot be exported at all.
 
 Every action starts with `requireSession()` or `requirePermission(...)` from
 `src/lib/auth/session.ts`, which resolves the profile and the effective permission codes.

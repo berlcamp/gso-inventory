@@ -13,70 +13,80 @@ import {
 } from "@/components/ui/table"
 import { Loader2, Plus, Search, Trash2, PackageSearch } from "lucide-react"
 import { searchItemsForOffice } from "@/lib/actions/catalog"
-import type { ItemWithRefs } from "@/types/database"
+import type { ItemPickerMode, OfficeItemHit } from "@/types/database"
 
 export interface EditorLine {
   item_id: string
   name: string
   unit: string
   category: string
+  /** The mode-appropriate ceiling for this line — see `searchItemsForOffice`. */
   available: number
+  balance: number
+  committed: number
   quantity: number
 }
 
-type SearchHit = ItemWithRefs & { available: number }
-
 /**
  * Item picker + quantity table shared by the new-request and walk-in forms.
- * `available` is the requesting office's remaining balance for the item —
- * releases draw it down, so it doubles as the ceiling for the line.
+ *
+ * The list only ever contains items the office can actually draw right now:
+ * the action reads its `office_stocks` allocation and drops anything with
+ * nothing left. `available` is that item's ceiling — `balance - committed` for
+ * a request, the raw balance for a walk-in, matching the check each flow hits.
  */
 export function ItemLineEditor({
   officeId,
   lines,
   onChange,
-  enforceAvailable = false,
+  mode = "request",
   disabled = false,
 }: {
   officeId: string | null
   lines: EditorLine[]
   onChange: (lines: EditorLine[]) => void
-  /** Walk-in releases deduct immediately, so quantities are capped there. */
-  enforceAvailable?: boolean
+  mode?: ItemPickerMode
   disabled?: boolean
 }) {
   const [query, setQuery] = useState("")
-  const [results, setResults] = useState<SearchHit[]>([])
+  // Tagged with the office it was fetched for, so switching offices can never
+  // leave the previous office's shelf on screen while the next one loads.
+  const [results, setResults] = useState<{
+    officeId: string
+    hits: OfficeItemHit[]
+    error: string | null
+  } | null>(null)
   const [loading, setLoading] = useState(false)
-  const [searched, setSearched] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const trimmed = query.trim()
 
-  const canSearch = Boolean(officeId) && trimmed.length >= 2
+  // Walk-in releases deduct immediately, so the quantity input is hard-capped.
+  const enforceAvailable = mode === "walk_in"
 
+  // An empty query lists everything the office holds: with the catalog already
+  // narrowed to its own allocation the whole shelf is worth showing, and a
+  // blank box would otherwise hide how little (or how much) is there.
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!canSearch) return
+    if (!officeId) return
 
     debounceRef.current = setTimeout(async () => {
       setLoading(true)
-      const res = await searchItemsForOffice(officeId!, trimmed)
+      const res = await searchItemsForOffice(officeId, trimmed, mode)
       setLoading(false)
-      setSearched(true)
-      if (!res.error) setResults(res.data)
+      setResults({ officeId, hits: res.data, error: res.error })
     }, 250)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [canSearch, officeId, trimmed])
+  }, [officeId, trimmed, mode])
 
-  // Stale hits are hidden rather than cleared, so the effect stays side-effect
-  // free while the query is being retyped.
-  const visibleResults = canSearch ? results : []
+  const current = results?.officeId === officeId ? results : null
+  const visibleResults = current?.hits ?? []
 
-  function addItem(hit: SearchHit) {
+  function addItem(hit: OfficeItemHit) {
     if (lines.some((l) => l.item_id === hit.id)) return
     onChange([
       ...lines,
@@ -86,12 +96,12 @@ export function ItemLineEditor({
         unit: hit.unit?.code ?? "",
         category: hit.category?.name ?? "",
         available: hit.available,
+        balance: hit.balance,
+        committed: hit.committed,
         quantity: 1,
       },
     ])
     setQuery("")
-    setResults([])
-    setSearched(false)
   }
 
   function updateQuantity(itemId: string, quantity: number) {
@@ -113,7 +123,7 @@ export function ItemLineEditor({
           <Input
             placeholder={
               officeId
-                ? "Search item name — at least 2 characters…"
+                ? "Search the items available to this office…"
                 : "Select an office first"
             }
             value={query}
@@ -126,9 +136,17 @@ export function ItemLineEditor({
           )}
         </div>
 
-        {canSearch && searched && !loading && visibleResults.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No items matched &ldquo;{trimmed}&rdquo;.
+        {current && !loading && visibleResults.length === 0 && (
+          <p
+            className={`text-sm ${
+              current.error ? "text-destructive" : "text-muted-foreground"
+            }`}
+          >
+            {current.error
+              ? current.error
+              : trimmed
+                ? `No item matching “${trimmed}” has stock available to this office.`
+                : "This office has no items with stock available for the fiscal year."}
           </p>
         )}
 
@@ -152,8 +170,15 @@ export function ItemLineEditor({
                             : "font-medium text-red-600"
                         }
                       >
-                        {hit.available.toLocaleString()} remaining
+                        {hit.available.toLocaleString()} available
                       </span>
+                      {!enforceAvailable && hit.committed > 0 && (
+                        <>
+                          {" "}
+                          · {hit.balance.toLocaleString()} remaining,{" "}
+                          {hit.committed.toLocaleString()} awaiting release
+                        </>
+                      )}
                     </p>
                   </div>
                   <Button
@@ -185,7 +210,7 @@ export function ItemLineEditor({
                 Unit
               </TableHead>
               <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Remaining
+                Available
               </TableHead>
               <TableHead className="w-[130px] text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Quantity
@@ -201,7 +226,7 @@ export function ItemLineEditor({
                     <PackageSearch className="h-8 w-8 text-muted-foreground/30" />
                     <p className="text-sm font-medium">No items added yet</p>
                     <p className="text-xs text-muted-foreground">
-                      Search above and add the supplies you need
+                      Pick from the items available to this office above
                     </p>
                   </div>
                 </TableCell>
@@ -242,7 +267,7 @@ export function ItemLineEditor({
                         <p className="mt-1 text-[11px] text-destructive">
                           {enforceAvailable
                             ? "Exceeds remaining balance"
-                            : "Above remaining balance"}
+                            : "Above what is available"}
                         </p>
                       )}
                     </TableCell>

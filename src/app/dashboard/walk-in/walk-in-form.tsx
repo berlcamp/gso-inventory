@@ -207,7 +207,8 @@ export function WalkInForm({ offices }: { offices: Office[] }) {
         <CardHeader>
           <CardTitle className="text-lg">Items Released</CardTitle>
           <CardDescription>
-            Quantities cannot exceed the office&apos;s remaining balance.
+            Only items this office still has stock for can be issued, and never
+            more than its remaining balance.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -215,7 +216,7 @@ export function WalkInForm({ offices }: { offices: Office[] }) {
             officeId={officeId || null}
             lines={lines}
             onChange={setLines}
-            enforceAvailable
+            mode="walk_in"
             disabled={submitting}
           />
         </CardContent>

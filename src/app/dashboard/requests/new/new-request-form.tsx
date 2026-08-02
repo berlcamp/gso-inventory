@@ -211,8 +211,9 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
         <CardHeader>
           <CardTitle className="text-lg">Items</CardTitle>
           <CardDescription>
-            &ldquo;Remaining&rdquo; is your office&apos;s balance for the fiscal
-            year. Releases draw it down.
+            Only items your office still has stock for this fiscal year can be
+            requested. &ldquo;Available&rdquo; is that balance less whatever
+            earlier approved requests are still waiting to collect.
           </CardDescription>
         </CardHeader>
         <CardContent>

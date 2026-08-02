@@ -245,8 +245,10 @@ function ItemPicker({
       return
     }
     setLoading(true)
-    const { searchItemsForOffice } = await import("@/lib/actions/catalog")
-    const res = await searchItemsForOffice(officeId, value.trim())
+    // The whole catalog, not just what this office holds — an adjustment is
+    // how an office starts carrying an item in the first place.
+    const { searchCatalogForOffice } = await import("@/lib/actions/catalog")
+    const res = await searchCatalogForOffice(officeId, value.trim())
     setLoading(false)
     if (!res.error) {
       setResults(

@@ -3,15 +3,22 @@
 import { revalidatePath } from "next/cache"
 import { requireSession, requirePermission, toError, SCHEMA } from "@/lib/auth/session"
 import { itemSchema, officeSchema } from "@/lib/schemas/gso"
+import { getSystemSettings } from "@/lib/actions/settings"
+import { loadAvailability } from "@/lib/inventory/availability"
 import type {
   ActionResult,
   Category,
+  ItemPickerMode,
   ItemWithRefs,
   Office,
+  OfficeItemHit,
   Unit,
 } from "@/types/database"
 
 const ITEM_SELECT = `*, category:categories(id, name), unit:units(id, code, name)`
+
+/** How many matches the picker offers at once — the rest need a narrower term. */
+const PICKER_LIMIT = 50
 
 /* ── Lookups (used to populate every dropdown in the app) ──────────────── */
 
@@ -82,10 +89,92 @@ export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
 }
 
 /**
- * Type-ahead for the request builder. Returns the item plus the requesting
- * office's remaining balance so the form can warn before an over-request.
+ * The items an office may actually put on a slip.
+ *
+ * Sourced from the office's own `office_stocks` rows rather than the catalog:
+ * an item the office holds no allocation for can never be released to it, and
+ * one whose balance is already spoken for would only fail at submit. Offering
+ * either would be inviting an error, so neither is offered.
+ *
+ * The ceiling matches whichever check the flow hits downstream — `balance -
+ * committed` for a request, raw `balance` for a walk-in — so the number on
+ * screen is the number that will be enforced.
+ *
+ * `allow_over_release` widens the list back to the office's full allocation,
+ * mirroring the setting's meaning everywhere else: the quantity ceiling is
+ * waived, the allocation requirement never is.
  */
 export async function searchItemsForOffice(
+  officeId: string,
+  query: string,
+  mode: ItemPickerMode = "request"
+): Promise<ActionResult<OfficeItemHit[]>> {
+  try {
+    const ctx = await requireSession()
+
+    // A supply officer files only for their own office; don't let the picker
+    // read another office's shelf even though the write path would refuse it.
+    if (!ctx.canViewAll && officeId !== ctx.profile.office_id) {
+      return { error: "You can only browse your own office's items.", data: [] }
+    }
+
+    const term = query.trim().toLowerCase()
+    const { data: settings } = await getSystemSettings()
+    const fiscalYear = settings.fiscal_year
+
+    const { data: stocks, error } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("office_stocks")
+      .select(`item_id, quantity, item:items!inner(${ITEM_SELECT})`)
+      .eq("office_id", officeId)
+      .eq("fiscal_year", fiscalYear)
+      .eq("item.is_active", true)
+
+    if (error) return { error: error.message, data: [] }
+
+    const rows = (stocks ?? []) as unknown as {
+      item_id: string
+      quantity: number
+      item: ItemWithRefs | null
+    }[]
+    if (rows.length === 0) return { error: null, data: [] }
+
+    const availability = await loadAvailability(
+      ctx,
+      officeId,
+      rows.map((r) => r.item_id),
+      fiscalYear
+    )
+
+    const hits: OfficeItemHit[] = []
+    for (const row of rows) {
+      if (!row.item) continue
+      if (term && !row.item.name.toLowerCase().includes(term)) continue
+
+      const balance = Number(row.quantity)
+      const committed = availability.get(row.item_id)?.committed ?? 0
+      const available = mode === "walk_in" ? balance : balance - committed
+
+      if (!settings.allow_over_release && available <= 0) continue
+      hits.push({ ...row.item, balance, committed, available })
+    }
+
+    hits.sort((a, b) => a.name.localeCompare(b.name))
+    return { error: null, data: hits.slice(0, PICKER_LIMIT) }
+  } catch (e) {
+    return { error: toError(e), data: [] }
+  }
+}
+
+/**
+ * Type-ahead over the **whole** catalog, annotated with this office's balance.
+ *
+ * Only the stock-adjustment dialog wants this: `adjust_stock` opens an
+ * allocation row for an item the office has never carried, so replenishing is
+ * exactly the case where "the office has none of it" must not hide the item.
+ * Requests and walk-ins use `searchItemsForOffice` instead.
+ */
+export async function searchCatalogForOffice(
   officeId: string,
   query: string
 ): Promise<ActionResult<(ItemWithRefs & { available: number })[]>> {

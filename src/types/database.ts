@@ -235,3 +235,21 @@ export interface ItemAvailability {
   committed: number
   available: number
 }
+
+/**
+ * Which ceiling the item picker enforces — they differ because the two flows
+ * hit different checks downstream:
+ *
+ * - `request`  — filed now, released later, so it must clear `balance -
+ *                committed` the way `createRequest`/`approveRequest` do.
+ * - `walk_in`  — releases immediately against the raw `balance`, exactly like
+ *                the `release_request` RPC it delegates to.
+ */
+export type ItemPickerMode = "request" | "walk_in"
+
+/**
+ * One item an office may actually draw on, as offered by the picker.
+ * `available` is the mode-appropriate ceiling; `balance` and `committed` are
+ * carried alongside so the UI can explain where the number came from.
+ */
+export type OfficeItemHit = ItemWithRefs & ItemAvailability
