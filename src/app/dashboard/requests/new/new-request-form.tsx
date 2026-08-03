@@ -67,7 +67,6 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
   const [remarks, setRemarks] = useState("")
   const [lines, setLines] = useState<EditorLine[]>([])
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   // A supply officer files only for their own office; GSO staff choose.
   const canChooseOffice = can("request.view_all")
@@ -77,20 +76,22 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
     value: o.id,
   }))
 
+  // Errors surface as a toast rather than a banner at the top of the form: the
+  // submit button sits below two full cards, so an inline alert would land off
+  // screen at the moment it has something to say.
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setError(null)
 
     if (!officeId) {
-      setError("Select the requesting office.")
+      toast.error("Select the requesting office.")
       return
     }
     if (lines.length === 0) {
-      setError("Add at least one item to the request.")
+      toast.error("Add at least one item to the request.")
       return
     }
     if (lines.some((l) => !l.quantity || l.quantity <= 0)) {
-      setError("Every item needs a quantity greater than zero.")
+      toast.error("Every item needs a quantity greater than zero.")
       return
     }
 
@@ -103,7 +104,7 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
     })
 
     if (result.error || !result.data) {
-      setError(result.error ?? "Could not file the request.")
+      toast.error(result.error ?? "Could not file the request.")
       setSubmitting(false)
       return
     }
@@ -136,13 +137,6 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Request Details</CardTitle>
