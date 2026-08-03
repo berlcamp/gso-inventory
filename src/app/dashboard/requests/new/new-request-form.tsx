@@ -222,6 +222,7 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
             lines={lines}
             onChange={setLines}
             disabled={submitting}
+            twoColumn
           />
         </CardContent>
       </Card>

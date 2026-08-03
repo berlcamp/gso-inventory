@@ -45,17 +45,25 @@ export function InventoryTable({
     [categories]
   )
 
+  // Without `request.view_all` (supply officer, department head) the rows are
+  // already scoped to the profile's own office server-side, so an office filter
+  // would only offer 27 other offices that all match nothing.
+  const canViewAllOffices = can("request.view_all")
+
   return (
     <DataTable
       columns={columns}
       data={rows}
       searchableColumns={[{ id: "item", title: "item" }]}
       filterableColumns={[
-        { id: "office", title: "Office", options: officeOptions },
+        ...(canViewAllOffices
+          ? [{ id: "office", title: "Office", options: officeOptions }]
+          : []),
         { id: "category", title: "Category", options: categoryOptions },
         { id: "level", title: "Stock level", options: STOCK_LEVEL_OPTIONS },
       ]}
-      initialColumnVisibility={{ level: false }}
+      initialColumnVisibility={{ level: false, category: false }}
+      fixedLayout
       emptyState={
         <div className="flex flex-col items-center gap-2">
           <Boxes className="h-8 w-8 text-muted-foreground/30" />
@@ -77,10 +85,7 @@ export function InventoryTable({
               { header: "Item", value: (r) => r.item?.name },
               { header: "Unit", value: (r) => r.item?.unit?.code },
               { header: "Opening", value: (r) => Number(r.opening_quantity) },
-              {
-                header: "Issued",
-                value: (r) => Number(r.opening_quantity) - Number(r.quantity),
-              },
+              { header: "Issued", value: (r) => Number(r.issued) },
               { header: "Remaining", value: (r) => Number(r.quantity) },
             ]}
           />

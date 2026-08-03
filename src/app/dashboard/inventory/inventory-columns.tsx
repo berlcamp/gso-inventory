@@ -30,32 +30,33 @@ export function getInventoryColumns(
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="Item" />
       ),
+      // The one column with no width: under `fixedLayout` it absorbs whatever
+      // the numeric columns leave, which is the definite width `truncate`
+      // needs. Long names clip instead of widening the table into a scrollbar.
       cell: ({ row }) => (
-        <p className="truncate text-sm font-medium">
-          {row.original.item?.name ?? "—"}
-        </p>
+        <div className="min-w-0">
+          <p
+            className="truncate text-sm font-medium"
+            title={row.original.item?.name ?? undefined}
+          >
+            {row.original.item?.name ?? "—"}
+          </p>
+          <p className="truncate text-xs text-muted-foreground">
+            {row.original.item?.category?.name ?? "—"}
+          </p>
+        </div>
       ),
-      meta: { cellClassName: "max-w-[280px]" },
     },
     {
-      // Filtered by category id, but sorted and read as the category name.
+      // Kept hidden (see initialColumnVisibility) — the name now reads under the
+      // item, but the toolbar still needs a column to filter category on.
+      // Hidden columns still take part in filtering and faceting.
       id: "category",
       accessorFn: (row) => row.item?.category?.id ?? "",
-      header: ({ column }) => (
-        <DataTableColumnHeader column={column} title="Category" />
-      ),
-      cell: ({ row }) => row.original.item?.category?.name ?? "—",
+      header: () => null,
       filterFn: (row, id, value: string[]) =>
         value.includes(row.getValue(id) as string),
-      sortingFn: (a, b) =>
-        (a.original.item?.category?.name ?? "").localeCompare(
-          b.original.item?.category?.name ?? ""
-        ),
-      meta: {
-        headerClassName: "hidden xl:table-cell",
-        cellClassName:
-          "hidden max-w-[200px] truncate text-xs text-muted-foreground xl:table-cell",
-      },
+      enableSorting: false,
     },
     {
       id: "office",
@@ -74,6 +75,7 @@ export function getInventoryColumns(
         (a.original.office?.code ?? "").localeCompare(
           b.original.office?.code ?? ""
         ),
+      meta: { headerClassName: "w-[92px]" },
     },
     {
       id: "unit",
@@ -83,7 +85,7 @@ export function getInventoryColumns(
       ),
       cell: ({ row }) => row.original.item?.unit?.code ?? "—",
       meta: {
-        headerClassName: "hidden sm:table-cell",
+        headerClassName: "hidden w-[76px] sm:table-cell",
         cellClassName: "hidden text-sm text-muted-foreground sm:table-cell",
       },
     },
@@ -99,14 +101,16 @@ export function getInventoryColumns(
       ),
       cell: ({ row }) => Number(row.original.opening_quantity).toLocaleString(),
       meta: {
-        headerClassName: "hidden text-right md:table-cell",
+        headerClassName: "hidden w-[104px] text-right md:table-cell",
         cellClassName:
           "hidden text-right tabular-nums text-muted-foreground md:table-cell",
       },
     },
     {
       id: "issued",
-      accessorFn: (row) => Number(row.opening_quantity) - Number(row.quantity),
+      // Summed from the release ledger by `getAllOfficeStocks`, not derived
+      // from the two balance columns — see the note on `OfficeStockRow.issued`.
+      accessorFn: (row) => Number(row.issued),
       header: ({ column }) => (
         <DataTableColumnHeader
           column={column}
@@ -116,7 +120,7 @@ export function getInventoryColumns(
       ),
       cell: ({ getValue }) => (getValue() as number).toLocaleString(),
       meta: {
-        headerClassName: "hidden text-right md:table-cell",
+        headerClassName: "hidden w-[96px] text-right md:table-cell",
         cellClassName:
           "hidden text-right tabular-nums text-muted-foreground md:table-cell",
       },
@@ -148,7 +152,7 @@ export function getInventoryColumns(
         )
       },
       meta: {
-        headerClassName: "text-right",
+        headerClassName: "w-[112px] text-right",
         cellClassName: "text-right font-semibold tabular-nums",
       },
     },

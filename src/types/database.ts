@@ -188,6 +188,13 @@ export type ItemWithRefs = Item & {
 export type OfficeStockRow = OfficeStock & {
   office: Pick<Office, "id" | "name" | "code"> | null
   item: ItemWithRefs | null
+  /**
+   * Total released for this office+item, summed from the ledger by
+   * `getAllOfficeStocks`. Not a column — it cannot be derived from
+   * `opening_quantity - quantity`, because a replenishment or an opening
+   * balance moves those two independently of anything being issued.
+   */
+  issued: number
 }
 
 export type RequestItemRow = RequestItem & {

@@ -244,6 +244,28 @@ export async function getStockForExport(
   try {
     const ctx = await requirePermission("reports.view")
 
+    // Issued is the release ledger's answer, not `opening - remaining` — that
+    // subtraction only agrees with reality on a row that has never been given
+    // an opening balance or a replenishment. Same source as the inventory page,
+    // so the two screens cannot disagree.
+    const { data: settings } = await getSystemSettings()
+    const { data: issuedRows, error: issuedError } = await ctx.supabase
+      .schema(SCHEMA)
+      .rpc("office_stock_issued", {
+        p_fiscal_year: settings.fiscal_year,
+        p_office_id: officeId ?? null,
+      })
+    if (issuedError) return { error: issuedError.message, data: [] }
+
+    const issued = new Map<string, number>()
+    for (const row of (issuedRows ?? []) as {
+      office_id: string
+      item_id: string
+      issued: number
+    }[]) {
+      issued.set(`${row.office_id}:${row.item_id}`, Number(row.issued))
+    }
+
     // Supabase caps a single response; page through so large exports are complete.
     // Each page rebuilds the query — a PostgREST builder is single-use.
     const pageSize = 1000
@@ -253,7 +275,7 @@ export async function getStockForExport(
         .schema(SCHEMA)
         .from("office_stocks")
         .select(
-          "quantity, opening_quantity, office:offices!office_id(name, code), item:items!item_id(name, category:categories(name), unit:units(code))"
+          "office_id, item_id, quantity, opening_quantity, office:offices!office_id(name, code), item:items!item_id(name, category:categories(name), unit:units(code))"
         )
         .order("office_id")
 
@@ -266,6 +288,8 @@ export async function getStockForExport(
       if (error) return { error: error.message, data: [] }
 
       const batch = (data ?? []) as unknown as {
+        office_id: string
+        item_id: string
         quantity: number
         opening_quantity: number
         office: { name: string; code: string } | null
@@ -284,7 +308,7 @@ export async function getStockForExport(
           item: r.item?.name ?? "",
           unit: r.item?.unit?.code ?? "",
           opening: Number(r.opening_quantity),
-          issued: Number(r.opening_quantity) - Number(r.quantity),
+          issued: issued.get(`${r.office_id}:${r.item_id}`) ?? 0,
           remaining: Number(r.quantity),
         })
       }

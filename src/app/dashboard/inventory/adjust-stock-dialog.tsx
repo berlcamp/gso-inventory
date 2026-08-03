@@ -28,10 +28,26 @@ import { adjustStock } from "@/lib/actions/inventory"
 import type { Office } from "@/types/database"
 
 const MOVEMENT_OPTIONS = [
+  { label: "Opening balance — set the year's allocation", value: "opening" },
   { label: "Replenishment — add stock", value: "replenishment" },
   { label: "Return — office returned stock", value: "return" },
   { label: "Adjustment — correction", value: "adjustment" },
 ]
+
+/** Movement types where a negative quantity is meaningful rather than a typo. */
+const SIGNED_MOVEMENTS = new Set(["adjustment", "opening"])
+
+/** Shown under the type picker so the two "add stock" options aren't a coin flip. */
+const MOVEMENT_HINTS: Record<string, string> = {
+  opening:
+    "The office's baseline allocation for the fiscal year — use this for an item added after the spreadsheet load. Raises the balance and the Opening figure together, so nothing is counted as issued.",
+  replenishment:
+    "Stock arriving on top of the baseline. Raises the balance only, so the Opening figure keeps showing what the year started with.",
+  return:
+    "Stock the office handed back. Raises the balance; reported separately from issuance.",
+  adjustment:
+    "A correction to the balance. May be negative — enter -5 to take five off.",
+}
 
 export function AdjustStockDialog({
   offices,
@@ -69,8 +85,13 @@ export function AdjustStockDialog({
       office_id: officeId,
       item_id: itemId,
       movement_type: movementType,
-      // A correction may go either way; the other two always add.
-      quantity: movementType === "adjustment" ? parsedQuantity : Math.abs(parsedQuantity),
+      // A correction may go either way, and so may an opening balance — a
+      // baseline entered wrong has to be correctable downward. Replenishment
+      // and return only ever add. The RPC still refuses to take either the
+      // balance or the baseline below zero.
+      quantity: SIGNED_MOVEMENTS.has(movementType)
+        ? parsedQuantity
+        : Math.abs(parsedQuantity),
       remarks: remarks.trim() || null,
     })
     setSubmitting(false)
@@ -170,6 +191,9 @@ export function AdjustStockDialog({
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                {MOVEMENT_HINTS[movementType]}
+              </p>
             </div>
 
             <div className="space-y-1.5">
@@ -186,7 +210,7 @@ export function AdjustStockDialog({
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
                 placeholder={
-                  movementType === "adjustment"
+                  SIGNED_MOVEMENTS.has(movementType)
                     ? "Use a negative number to deduct"
                     : "Quantity to add"
                 }

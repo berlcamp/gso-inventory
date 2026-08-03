@@ -6,6 +6,7 @@ import { format } from "date-fns"
 
 import { DataTable } from "@/components/tables/data-table"
 import { ExportCsvButton } from "@/components/tables/export-csv-button"
+import { usePermissions } from "@/lib/hooks/use-permissions"
 import {
   requestColumns,
   REQUEST_SOURCE_OPTIONS,
@@ -20,10 +21,19 @@ export function RequestsTable({
   rows: SupplyRequestRow[]
   offices: Office[]
 }) {
+  const { can } = usePermissions()
+
   const officeOptions = useMemo(
     () => offices.map((o) => ({ label: `${o.code} — ${o.name}`, value: o.id })),
     [offices]
   )
+
+  // Without `request.view_all` (supply officer, department head) the rows are
+  // already scoped to the profile's own office server-side, so an office filter
+  // would only offer 27 other offices that all match nothing. Gating on the
+  // permission rather than `offices.length` — `getOffices()` is unscoped and
+  // returns every active office to any session.
+  const canViewAllOffices = can("request.view_all")
 
   return (
     <DataTable
@@ -32,9 +42,7 @@ export function RequestsTable({
       searchableColumns={[{ id: "request_no", title: "RIS #" }]}
       filterableColumns={[
         { id: "status", title: "Status", options: REQUEST_STATUS_OPTIONS },
-        // A supply officer only ever sees their own office, so the filter is
-        // pointless for them.
-        ...(offices.length > 1
+        ...(canViewAllOffices
           ? [{ id: "office", title: "Office", options: officeOptions }]
           : []),
         { id: "source", title: "Source", options: REQUEST_SOURCE_OPTIONS },

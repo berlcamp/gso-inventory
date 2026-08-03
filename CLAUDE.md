@@ -38,11 +38,28 @@ Each office carries a **remaining balance per item** for the fiscal year, seeded
 keep a separate central stock number — the per-office balance *is* the inventory.
 
 `gso_inventory.office_stocks` is one row per `(office, item, fiscal_year)`:
-- `opening_quantity` — the baseline loaded from the spreadsheet
+- `opening_quantity` — the baseline: what the office was allocated for the year
 - `quantity` — what is left right now
 
 Every change to `quantity` writes a `gso_inventory.stock_movements` row (signed quantity +
 resulting balance). That ledger is the audit trail and the source for all issuance reporting.
+
+**Issuance is read from the ledger, never as `opening_quantity - quantity`.** Those two
+columns move independently: an `opening` movement raises both (a baseline is granted,
+nothing was issued), a `replenishment` raises only `quantity` (stock arrived on top of the
+baseline). The subtraction is only equal to issuance on a row whose sole movements are
+releases — true of untouched seeded rows and nothing else, which is why stocking a newly
+catalogued item with 10,000 units used to render as "Issued −10,000". `office_stock_issued`
+sums the release movements instead; `getAllOfficeStocks` attaches the result as
+`OfficeStockRow.issued`, and `getStockForExport` reads the same RPC so the inventory page
+and the stock-balance report cannot disagree. Returns are **not** netted off — `reports.ts`
+keeps releases and returns in separate columns on the grounds that how to treat a return is
+the reader's judgement.
+
+Baselines for items added after the spreadsheet load come from the `opening` movement type
+in `adjust_stock` (admin → inventory → Adjust Stock → "Opening balance"), which is the only
+path that writes `opening_quantity`. The enum had `opening` from migration 1 but nothing
+could reach it until migration 10.
 
 ### Request flow
 
@@ -83,8 +100,9 @@ change, the ledger row, and the status transition commit together.
 | Function | Purpose |
 |---|---|
 | `release_request(request_id, actor_id, lines, received_by, remarks)` | Deducts each line from the office balance, writes ledger rows, recomputes request status. Rejects releasing more than was approved, and — unless `allow_over_release` is on — more than the balance. |
-| `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Replenishment, return, or manual correction. Signed quantity; refuses to go negative. |
+| `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Opening balance, replenishment, return, or manual correction. Signed quantity; refuses to take either the balance or the baseline negative. `movement_type = 'opening'` moves `opening_quantity` in step with `quantity`; every other type moves the balance alone. |
 | `create_walk_in_release(office_id, actor_id, requester_name, purpose, lines, remarks)` | One-step counter issuance; delegates to `release_request`. |
+| `office_stock_issued(fiscal_year, office_id)` | Total released per office+item, summed from the ledger. Read-only. Takes an explicit office filter because it is `SECURITY DEFINER` — callers without `request.view_all` pass their own office. |
 
 ### Balance enforcement
 
@@ -225,6 +243,7 @@ GSO's stamps `reviewed_by`/`reviewed_at`.
 7. `..._department_head_approval.sql` — the `awaiting_endorsement` status and `endorsed` action, the `endorsed_by`/`endorsed_at` columns, and the `department_head` role plus `request.endorse`
 8. `..._request_default_awaiting_endorsement.sql` — points `requests.status`'s default at the new stage. Separate from 7 on purpose: Postgres refuses to *use* an enum value in the transaction that added it
 9. `..._seed_department_heads.sql` — template: fill in each office's Google email. Its closing `SELECT` lists offices that still have no head and therefore cannot file
+10. `..._opening_balance_and_ledger_issued.sql` — replaces `adjust_stock` so the `opening` movement type sets `opening_quantity`, and so the fiscal year comes from `system_settings` rather than the wall clock (it was the last place still reading the calendar year). Adds `office_stock_issued`. Backfills a baseline onto rows an adjustment opened at zero — skipping seeded rows, where `opening_quantity = 0` is a fact from the spreadsheet rather than a missing baseline. Idempotent; its closing `SELECT` lists allocations that still have no baseline
 
 ### Types
 
@@ -241,12 +260,51 @@ npx supabase gen types typescript --project-id <id> --schema gso_inventory > src
 - `src/components/tables/` — the TanStack `DataTable` and its toolbar, faceted filter, pagination, sortable header, skeleton, and CSV export
 - `src/components/gso/` — `ItemLineEditor`, the item picker shared by the request and walk-in forms
 
-**Local edit to the primitives:** `Input`, `Textarea`, and `SelectTrigger` were changed
-from `bg-transparent` to `bg-card` so form fields read as white against this theme's grey
-page background (`--background` is #F0F2F5; `--card` is the white surface — `bg-background`
-would be the *grey*). The `dark:bg-input/30` fill is untouched, because `bg-card` in dark
-mode is the panel colour and a field would disappear into it. Re-running
-`npx shadcn add input|textarea|select` reverts this — reapply it after.
+**Local edits to the primitives.** All are reverted by re-running
+`npx shadcn add input|textarea|select|dropdown-menu` — reapply them after.
+
+1. `Input`, `Textarea`, and `SelectTrigger` were changed from `bg-transparent` to
+   `bg-card` so form fields read as white against this theme's grey page background
+   (`--background` is #F0F2F5; `--card` is the white surface — `bg-background` would be
+   the *grey*). The `dark:bg-input/30` fill is untouched, because `bg-card` in dark mode
+   is the panel colour and a field would disappear into it.
+
+2. `SelectContent`'s popup keeps `w-(--anchor-width)` (the trigger's width), but a long
+   option is no longer cut off: `whitespace-nowrap` came off `SelectItem`'s text and
+   `shrink-0` became `min-w-0 … break-words`, so it **wraps onto a second line** instead
+   of overflowing into `overflow-x-hidden`, which clipped it.
+
+   Letting the popup widen instead is the obvious-looking fix and is wrong. The only
+   width cap Base UI offers is `--available-width`, which it computes against the
+   **viewport** — and the popup is portalled onto a `position: fixed` positioner, so no
+   ancestor bounds it. Inside the 480px Adjust Stock dialog that measured 604px, spilling
+   144px past the modal. Anchor width is inherently container-safe: the trigger is
+   already inside whatever box should contain the popup.
+
+   The *trigger* keeps its `line-clamp-1` — it has a fixed width and must stay one line.
+
+3. `SelectContent` and `DropdownMenuContent` popups were `max-h-(--available-height)`.
+   Base UI computes that against the **viewport**, so inside a dialog a long list (the
+   28-office picker in Adjust Stock) grew past the modal's edges instead of scrolling
+   within it. Both are now a flat `max-h-72`, keeping the `overflow-y-auto` they already
+   had. 288px also matches `CommandList`'s existing cap, so every list surface in the app
+   tops out at the same height. Popups are portalled, so no ancestor height can bound them
+   — the cap has to be on the popup itself.
+
+Inline (non-portalled) option lists cap themselves where they are written: the item picker
+in `ItemLineEditor` and the one in `AdjustStockDialog`. They scroll inside the modal
+already and are not affected by the above.
+
+4. `DialogContent` gained `*:min-w-0`. It lays its children out with `grid`, and a grid
+   item's default `min-width: auto` refuses to shrink below its content's min-content
+   width — so one long line (a selected item label, an office name in a Select trigger)
+   widened the `<form>` past the dialog's own `max-w` and pushed every field out the right
+   edge, footer included. The `truncate` that should have caught it never engaged, because
+   the parent kept growing to make room. Measured at the 480px Adjust Stock dialog: an
+   87-character item label produced a 606px form, 166px wider than the 440px content box;
+   with `*:min-w-0` the form is exactly 440px and the label truncates. Any new dialog gets
+   this automatically. `SheetContent` is `flex flex-col` and is only used by the mobile
+   sidebar, so it was left alone.
 
 ### Route Structure
 

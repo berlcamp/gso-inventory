@@ -57,6 +57,7 @@ export function DataTable<TData, TValue>({
   initialSorting = [],
   initialColumnVisibility,
   pageSize = 25,
+  fixedLayout = false,
 }: {
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
@@ -69,6 +70,18 @@ export function DataTable<TData, TValue>({
   initialSorting?: SortingState
   initialColumnVisibility?: VisibilityState
   pageSize?: number
+  /**
+   * Lay the table out on fixed column widths instead of sizing to content.
+   * `Table` renders inside `overflow-x-auto`, so under the default auto layout
+   * one long cell widens the whole table and hands the page a horizontal
+   * scrollbar. With this on, every column except the flexible one needs a width
+   * in its `meta.headerClassName`, and the flexible column's cell needs
+   * `truncate` — it now has a definite width to truncate against.
+   *
+   * Off by default: a table whose columns are all short reads better sized to
+   * its content.
+   */
+  fixedLayout?: boolean
 }) {
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>(initialColumnVisibility ?? {})
@@ -110,7 +123,7 @@ export function DataTable<TData, TValue>({
       </DataTableToolbar>
 
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card shadow-sm">
-        <Table>
+        <Table className={fixedLayout ? "table-fixed" : undefined}>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow
@@ -138,7 +151,9 @@ export function DataTable<TData, TValue>({
             {rows.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={table.getAllLeafColumns().length}
+                  // Visible, not all — a hidden filter-only column has no
+                  // <th>, so counting it over-spans the empty-state row.
+                  colSpan={table.getVisibleLeafColumns().length}
                   className="py-16 text-center text-muted-foreground"
                 >
                   {emptyState ?? (

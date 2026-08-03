@@ -92,7 +92,13 @@ export function DataTableFacetedFilter<TData, TValue>({
           </>
         )}
       </PopoverTrigger>
-      <PopoverContent className="w-[240px] p-0" align="start">
+      {/* Sized to the longest option rather than a fixed 240px — office labels
+          are "CODE — Full Office Name" and were being cut off. Floored so short
+          lists still look like a menu, capped at what the viewport allows. */}
+      <PopoverContent
+        className="w-auto min-w-[240px] max-w-(--available-width) p-0"
+        align="start"
+      >
         <Command>
           <CommandInput placeholder={title} />
           <CommandList>
@@ -114,7 +120,7 @@ export function DataTableFacetedFilter<TData, TValue>({
                   >
                     <div
                       className={cn(
-                        "mr-2 flex h-4 w-4 items-center justify-center rounded-sm border border-primary",
+                        "mr-2 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-primary",
                         isSelected
                           ? "bg-primary text-primary-foreground"
                           : "opacity-50 [&_svg]:invisible"
@@ -125,9 +131,9 @@ export function DataTableFacetedFilter<TData, TValue>({
                     {option.icon && (
                       <option.icon className="mr-2 h-4 w-4 text-muted-foreground" />
                     )}
-                    <span className="truncate">{option.label}</span>
+                    <span>{option.label}</span>
                     {facets?.get(option.value) && (
-                      <span className="ml-auto flex h-4 items-center justify-center font-mono text-xs text-muted-foreground">
+                      <span className="ml-auto flex h-4 shrink-0 items-center justify-center font-mono text-xs text-muted-foreground">
                         {facets.get(option.value)}
                       </span>
                     )}

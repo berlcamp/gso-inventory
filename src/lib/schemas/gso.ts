@@ -59,7 +59,10 @@ export const itemSchema = z.object({
 export const adjustStockSchema = z.object({
   office_id: z.string().uuid("Select an office."),
   item_id: z.string().uuid("Select an item."),
-  movement_type: z.enum(["replenishment", "return", "adjustment"]),
+  // "opening" sets the fiscal-year baseline (moves opening_quantity alongside
+  // the balance) — the only way to give an item added after the spreadsheet
+  // load a baseline. The enum has always had it; it was just unreachable.
+  movement_type: z.enum(["opening", "replenishment", "return", "adjustment"]),
   quantity: z.coerce
     .number()
     .refine((v) => v !== 0, "Quantity cannot be zero.")

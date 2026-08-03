@@ -6,6 +6,7 @@ import { format } from "date-fns"
 
 import { DataTable } from "@/components/tables/data-table"
 import { ExportCsvButton } from "@/components/tables/export-csv-button"
+import { usePermissions } from "@/lib/hooks/use-permissions"
 import { movementColumns, MOVEMENT_TYPE_OPTIONS } from "./movement-columns"
 import type { Office, StockMovementRow } from "@/types/database"
 
@@ -16,10 +17,17 @@ export function MovementsContent({
   rows: StockMovementRow[]
   offices: Office[]
 }) {
+  const { can } = usePermissions()
+
   const officeOptions = useMemo(
     () => offices.map((o) => ({ label: `${o.code} — ${o.name}`, value: o.id })),
     [offices]
   )
+
+  // Without `request.view_all` (supply officer, department head) the rows are
+  // already scoped to the profile's own office server-side, so an office filter
+  // would only offer 27 other offices that all match nothing.
+  const canViewAllOffices = can("request.view_all")
 
   return (
     <DataTable
@@ -27,7 +35,9 @@ export function MovementsContent({
       data={rows}
       searchableColumns={[{ id: "item", title: "item" }]}
       filterableColumns={[
-        { id: "office", title: "Office", options: officeOptions },
+        ...(canViewAllOffices
+          ? [{ id: "office", title: "Office", options: officeOptions }]
+          : []),
         { id: "movement_type", title: "Type", options: MOVEMENT_TYPE_OPTIONS },
       ]}
       initialSorting={[{ id: "date", desc: true }]}

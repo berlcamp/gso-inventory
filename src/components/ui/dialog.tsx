@@ -53,7 +53,14 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-5 text-sm text-popover-foreground shadow-xl ring-1 ring-foreground/10 duration-150 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // `*:min-w-0` — this is a grid, and a grid item's default
+          // `min-width: auto` refuses to shrink below its content's min-content
+          // width. One long unbreakable-ish line (a selected item label, an
+          // office name in a Select trigger) therefore widened the form past
+          // the dialog's own max-width and spilled every field out the right
+          // edge, while the `truncate` that should have caught it never
+          // engaged — there was always "enough" room once the parent grew.
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-5 text-sm text-popover-foreground shadow-xl ring-1 ring-foreground/10 duration-150 outline-none *:min-w-0 sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}

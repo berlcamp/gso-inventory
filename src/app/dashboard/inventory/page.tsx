@@ -20,7 +20,7 @@ export default async function InventoryPage() {
 
       {/* Nothing is awaited above the boundary, so the header paints straight
           away while the rows load. Filtering happens in the browser from here. */}
-      <Suspense fallback={<DataTableSkeleton columns={7} filters={3} />}>
+      <Suspense fallback={<DataTableSkeleton columns={6} filters={3} />}>
         <Results />
       </Suspense>
     </div>

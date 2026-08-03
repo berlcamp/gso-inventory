@@ -8,7 +8,7 @@ export default function Loading() {
         title="Inventory"
         subtitle="Remaining supply balance per office for the fiscal year"
       />
-      <DataTableSkeleton columns={7} filters={3} />
+      <DataTableSkeleton columns={6} filters={3} />
     </div>
   )
 }

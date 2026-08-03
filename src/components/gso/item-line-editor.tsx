@@ -34,6 +34,11 @@ export interface EditorLine {
  * the action reads its `office_stocks` allocation and drops anything with
  * nothing left. `available` is that item's ceiling — `balance - committed` for
  * a request, the raw balance for a walk-in, matching the check each flow hits.
+ *
+ * `twoColumn` sits the picker beside the selected lines from `lg` up, so adding
+ * an item does not push the table out of view. Opt-in rather than the default:
+ * both callers render this at full page width, but only the request form has
+ * asked for the split.
  */
 export function ItemLineEditor({
   officeId,
@@ -41,12 +46,14 @@ export function ItemLineEditor({
   onChange,
   mode = "request",
   disabled = false,
+  twoColumn = false,
 }: {
   officeId: string | null
   lines: EditorLine[]
   onChange: (lines: EditorLine[]) => void
   mode?: ItemPickerMode
   disabled?: boolean
+  twoColumn?: boolean
 }) {
   const [query, setQuery] = useState("")
   // Tagged with the office it was fetched for, so switching offices can never
@@ -115,7 +122,13 @@ export function ItemLineEditor({
   }
 
   return (
-    <div className="space-y-4">
+    <div
+      className={
+        twoColumn
+          ? "grid gap-4 lg:grid-cols-2 lg:items-start"
+          : "space-y-4"
+      }
+    >
       {/* Search */}
       <div className="space-y-2">
         <div className="relative">
@@ -159,9 +172,11 @@ export function ItemLineEditor({
                   key={hit.id}
                   className="flex items-center justify-between gap-3 p-2.5 hover:bg-muted/40"
                 >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{hit.name}</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium" title={hit.name}>
+                      {hit.name}
+                    </p>
+                    <p className="truncate mt-0.5 text-xs text-muted-foreground">
                       {hit.category?.name ?? "—"} · {hit.unit?.code ?? "—"} ·{" "}
                       <span
                         className={
@@ -185,6 +200,7 @@ export function ItemLineEditor({
                     type="button"
                     size="sm"
                     variant="outline"
+                    className="shrink-0"
                     disabled={alreadyAdded || disabled}
                     onClick={() => addItem(hit)}
                   >
@@ -198,109 +214,121 @@ export function ItemLineEditor({
         )}
       </div>
 
-      {/* Selected lines */}
-      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-        <Table>
-          <TableHeader>
-            <TableRow className="border-b border-border/60 bg-muted/40 hover:bg-muted/40">
-              <TableHead className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Item
-              </TableHead>
-              <TableHead className="hidden text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:table-cell">
-                Unit
-              </TableHead>
-              <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Available
-              </TableHead>
-              <TableHead className="w-[130px] text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Quantity
-              </TableHead>
-              <TableHead className="w-[52px]" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {lines.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={5} className="py-12 text-center text-muted-foreground">
-                  <div className="flex flex-col items-center gap-2">
-                    <PackageSearch className="h-8 w-8 text-muted-foreground/30" />
-                    <p className="text-sm font-medium">No items added yet</p>
-                    <p className="text-xs text-muted-foreground">
-                      Pick from the items available to this office above
-                    </p>
-                  </div>
-                </TableCell>
+      {/* Selected lines — table and its tally are one grid child so the count
+          stays under the table rather than dropping into the picker column. */}
+      <div className="space-y-4">
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+          {/* table-fixed so the Item column is whatever is left over — a
+              definite width, which is what `truncate` needs. Auto layout would
+              instead widen the table to fit the longest name and hand the
+              container a horizontal scrollbar. */}
+          <Table className="table-fixed">
+            <TableHeader>
+              <TableRow className="border-b border-border/60 bg-muted/40 hover:bg-muted/40">
+                <TableHead className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Item
+                </TableHead>
+                <TableHead className="hidden w-[64px] text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:table-cell">
+                  Unit
+                </TableHead>
+                <TableHead className="w-[96px] text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Available
+                </TableHead>
+                <TableHead className="w-[112px] text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Quantity
+                </TableHead>
+                <TableHead className="w-[48px]" />
               </TableRow>
-            ) : (
-              lines.map((line) => {
-                const over = line.quantity > line.available
-                return (
-                  <TableRow key={line.item_id} className="border-border/40">
-                    <TableCell>
-                      <p className="text-sm font-medium">{line.name}</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {line.category}
+            </TableHeader>
+            <TableBody>
+              {lines.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="py-12 text-center text-muted-foreground">
+                    <div className="flex flex-col items-center gap-2">
+                      <PackageSearch className="h-8 w-8 text-muted-foreground/30" />
+                      <p className="text-sm font-medium">No items added yet</p>
+                      <p className="text-xs text-muted-foreground">
+                        Pick from the items available to this office
                       </p>
-                    </TableCell>
-                    <TableCell className="hidden text-sm text-muted-foreground sm:table-cell">
-                      {line.unit}
-                    </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums text-muted-foreground">
-                      {line.available.toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Input
-                        type="number"
-                        min={0}
-                        step="any"
-                        max={enforceAvailable ? line.available : undefined}
-                        value={line.quantity}
-                        disabled={disabled}
-                        onChange={(e) =>
-                          updateQuantity(line.item_id, Number(e.target.value))
-                        }
-                        className={`h-8 text-right tabular-nums ${
-                          over ? "border-destructive focus-visible:border-destructive" : ""
-                        }`}
-                      />
-                      {over && (
-                        <p className="mt-1 text-[11px] text-destructive">
-                          {enforceAvailable
-                            ? "Exceeds remaining balance"
-                            : "Above what is available"}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                lines.map((line) => {
+                  const over = line.quantity > line.available
+                  return (
+                    <TableRow key={line.item_id} className="border-border/40">
+                      <TableCell>
+                        <p
+                          className="truncate text-sm font-medium"
+                          title={line.name}
+                        >
+                          {line.name}
                         </p>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        disabled={disabled}
-                        onClick={() => removeLine(line.item_id)}
-                        className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                        title="Remove item"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-          </TableBody>
-        </Table>
-      </div>
+                        <p className="truncate mt-0.5 text-xs text-muted-foreground">
+                          {line.category}
+                        </p>
+                      </TableCell>
+                      <TableCell className="hidden text-sm text-muted-foreground sm:table-cell">
+                        {line.unit}
+                      </TableCell>
+                      <TableCell className="text-right text-sm tabular-nums text-muted-foreground">
+                        {line.available.toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Input
+                          type="number"
+                          min={0}
+                          step="any"
+                          max={enforceAvailable ? line.available : undefined}
+                          value={line.quantity}
+                          disabled={disabled}
+                          onChange={(e) =>
+                            updateQuantity(line.item_id, Number(e.target.value))
+                          }
+                          className={`h-8 text-right tabular-nums ${
+                            over ? "border-destructive focus-visible:border-destructive" : ""
+                          }`}
+                        />
+                        {over && (
+                          <p className="mt-1 whitespace-normal text-[11px] text-destructive">
+                            {enforceAvailable
+                              ? "Exceeds remaining balance"
+                              : "Above what is available"}
+                          </p>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          disabled={disabled}
+                          onClick={() => removeLine(line.item_id)}
+                          className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                          title="Remove item"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
 
-      {lines.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          {lines.length} item{lines.length === 1 ? "" : "s"} ·{" "}
-          {lines
-            .reduce((sum, l) => sum + (Number(l.quantity) || 0), 0)
-            .toLocaleString()}{" "}
-          total units
-        </p>
-      )}
+        {lines.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {lines.length} item{lines.length === 1 ? "" : "s"} ·{" "}
+            {lines
+              .reduce((sum, l) => sum + (Number(l.quantity) || 0), 0)
+              .toLocaleString()}{" "}
+            total units
+          </p>
+        )}
+      </div>
     </div>
   )
 }

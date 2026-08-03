@@ -8,6 +8,7 @@ import {
   SCHEMA,
 } from "@/lib/auth/session"
 import { adjustStockSchema } from "@/lib/schemas/gso"
+import { getSystemSettings } from "@/lib/actions/settings"
 import type {
   ActionResult,
   OfficeStockRow,
@@ -50,9 +51,39 @@ export async function getAllOfficeStocks(): Promise<
       query = query.eq("office_id", ctx.profile.office_id)
     }
 
-    const { data, error } = await query
+    // Issuance comes from the ledger, never from `opening_quantity - quantity`:
+    // an opening balance moves both columns and a replenishment moves only one,
+    // so that subtraction answers "how much has gone out" for exactly one kind
+    // of row — the ones the 2026 seed created and nobody has restocked.
+    const settings = await getSystemSettings()
+    const [{ data, error }, issuedResult] = await Promise.all([
+      query,
+      ctx.supabase.schema(SCHEMA).rpc("office_stock_issued", {
+        p_fiscal_year: settings.data.fiscal_year,
+        p_office_id: ctx.canViewAll ? null : ctx.profile.office_id,
+      }),
+    ])
+
     if (error) return { error: error.message, data: [] }
-    return { error: null, data: (data ?? []) as unknown as OfficeStockRow[] }
+    if (issuedResult.error) {
+      return { error: issuedResult.error.message, data: [] }
+    }
+
+    const issued = new Map<string, number>()
+    for (const row of (issuedResult.data ?? []) as {
+      office_id: string
+      item_id: string
+      issued: number
+    }[]) {
+      issued.set(`${row.office_id}:${row.item_id}`, Number(row.issued))
+    }
+
+    const rows = (data ?? []) as unknown as OfficeStockRow[]
+    for (const row of rows) {
+      row.issued = issued.get(`${row.office_id}:${row.item_id}`) ?? 0
+    }
+
+    return { error: null, data: rows }
   } catch (e) {
     return { error: toError(e), data: [] }
   }
