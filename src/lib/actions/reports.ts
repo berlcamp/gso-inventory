@@ -1,6 +1,7 @@
 "use server"
 
 import { requirePermission, toError, SCHEMA } from "@/lib/auth/session"
+import { getSystemSettings } from "@/lib/actions/settings"
 import type { ActionResult, RequestStatus } from "@/types/database"
 
 export interface OfficeIssuance {
@@ -289,6 +290,238 @@ export async function getStockForExport(
 
       if (batch.length < pageSize) break
     }
+
+    return { error: null, data: rows }
+  } catch (e) {
+    return { error: toError(e), data: [] }
+  }
+}
+
+/* ── Forecasting input ─────────────────────────────────────────────────── */
+
+export interface ConsumptionForecastRow {
+  item: string
+  category: string
+  unit: string
+  year: number
+  month: number
+  is_partial_month: number
+  units_issued: number
+  units_returned: number
+  requests: number
+  opening_qty: number
+  remaining_qty: number
+  reorder_level: number
+  data_start: string
+  data_end: string
+  months_covered: number
+}
+
+const PAGE_SIZE = 1000
+
+/**
+ * Reads a table to exhaustion. Supabase caps a single response, and a
+ * PostgREST builder is single-use, so the caller supplies a factory that
+ * rebuilds the query per page rather than a builder to re-range.
+ */
+async function fetchAllPages<T>(
+  page: (
+    from: number,
+    to: number
+  ) => PromiseLike<{ data: unknown; error: { message: string } | null }>
+): Promise<{ rows: T[]; error: string | null }> {
+  const rows: T[] = []
+  for (let i = 0; ; i++) {
+    const { data, error } = await page(i * PAGE_SIZE, i * PAGE_SIZE + PAGE_SIZE - 1)
+    if (error) return { rows: [], error: error.message }
+    const batch = (data ?? []) as T[]
+    rows.push(...batch)
+    if (batch.length < PAGE_SIZE) break
+  }
+  return { rows, error: null }
+}
+
+/** Months are compared as a single ordinal so spanning a year boundary is arithmetic. */
+const toOrdinal = (year: number, month: number) => year * 12 + (month - 1)
+const fromOrdinal = (n: number) => ({ year: Math.floor(n / 12), month: (n % 12) + 1 })
+const monthLabel = (year: number, month: number) =>
+  `${year}-${String(month).padStart(2, "0")}`
+
+/**
+ * Monthly consumption per item, summed across every office — the input for a
+ * forecasting pass run outside the app.
+ *
+ * Deliberately takes no filters. Handing a forecaster a truncated window is
+ * the main way this export produces a wrong answer, so it always covers every
+ * office and the whole ledger regardless of what the Reports page has set.
+ *
+ * Quiet months are emitted as explicit zeros: a month that is missing and a
+ * month that saw no issuance mean very different things to a forecast, and
+ * only one of them is visible if the row is simply absent.
+ */
+export async function getConsumptionForForecast(): Promise<
+  ActionResult<ConsumptionForecastRow[]>
+> {
+  try {
+    const ctx = await requirePermission("reports.view")
+    const { data: settings } = await getSystemSettings()
+
+    // Item metadata, resolved once so neither pass below has to re-join it.
+    const catalog = await fetchAllPages<{
+      id: string
+      name: string
+      reorder_level: number
+      category: { name: string } | null
+      unit: { code: string } | null
+    }>((from, to) =>
+      ctx.supabase
+        .schema(SCHEMA)
+        .from("items")
+        .select("id, name, reorder_level, category:categories(name), unit:units(code)")
+        .order("id")
+        .range(from, to)
+    )
+    if (catalog.error) return { error: catalog.error, data: [] }
+
+    const meta = new Map(
+      catalog.rows.map((r) => [
+        r.id,
+        {
+          item: r.name,
+          category: r.category?.name ?? "UNCATEGORIZED",
+          unit: r.unit?.code ?? "",
+          reorder_level: Number(r.reorder_level),
+        },
+      ])
+    )
+
+    // Citywide allocation position per item, for the settings fiscal year.
+    const stocks = await fetchAllPages<{
+      item_id: string
+      quantity: number
+      opening_quantity: number
+    }>((from, to) =>
+      ctx.supabase
+        .schema(SCHEMA)
+        .from("office_stocks")
+        .select("item_id, quantity, opening_quantity")
+        .eq("fiscal_year", settings.fiscal_year)
+        // Ordered by the primary key, not item_id: paging needs a unique sort
+        // key or rows sharing one can be skipped or repeated across a page
+        // boundary, quietly corrupting the sums below.
+        .order("id")
+        .range(from, to)
+    )
+    if (stocks.error) return { error: stocks.error, data: [] }
+
+    const position = new Map<string, { opening: number; remaining: number }>()
+    for (const row of stocks.rows) {
+      const entry = position.get(row.item_id) ?? { opening: 0, remaining: 0 }
+      entry.opening += Number(row.opening_quantity)
+      entry.remaining += Number(row.quantity)
+      position.set(row.item_id, entry)
+    }
+
+    // The ledger, in full. Releases and returns stay separate — how to treat a
+    // return is a judgement for whoever reads the file, not one to bake in here.
+    const movements = await fetchAllPages<{
+      item_id: string
+      quantity: number
+      movement_type: string
+      request_id: string | null
+      created_at: string
+    }>((from, to) =>
+      ctx.supabase
+        .schema(SCHEMA)
+        .from("stock_movements")
+        .select("item_id, quantity, movement_type, request_id, created_at")
+        .in("movement_type", ["release", "return"])
+        // Primary key again — created_at is not unique enough to page on.
+        .order("id")
+        .range(from, to)
+    )
+    if (movements.error) return { error: movements.error, data: [] }
+
+    type Bucket = { issued: number; returned: number; requests: Set<string> }
+    const buckets = new Map<string, Bucket>()
+    const key = (itemId: string, ordinal: number) => `${itemId}@${ordinal}`
+
+    let earliest: number | null = null
+    for (const row of movements.rows) {
+      const at = new Date(row.created_at)
+      const ordinal = toOrdinal(at.getFullYear(), at.getMonth() + 1)
+      if (earliest === null || ordinal < earliest) earliest = ordinal
+
+      const bucket = buckets.get(key(row.item_id, ordinal)) ?? {
+        issued: 0,
+        returned: 0,
+        requests: new Set<string>(),
+      }
+      if (row.movement_type === "release") {
+        bucket.issued += Math.abs(Number(row.quantity))
+        if (row.request_id) bucket.requests.add(row.request_id)
+      } else {
+        bucket.returned += Math.abs(Number(row.quantity))
+      }
+      buckets.set(key(row.item_id, ordinal), bucket)
+    }
+
+    // Row space is every item an office holds an allocation for, unioned with
+    // every item that has actually moved. The union matters in both
+    // directions: an allocated item nobody touched is a signal to procure
+    // less, and consumption must never vanish because its allocation row did.
+    const itemIds = new Set<string>([
+      ...position.keys(),
+      ...movements.rows.map((r) => r.item_id),
+    ])
+
+    const now = new Date()
+    const latest = toOrdinal(now.getFullYear(), now.getMonth() + 1)
+    const start = earliest ?? latest
+    const span = Array.from({ length: latest - start + 1 }, (_, i) => start + i)
+
+    const startAt = fromOrdinal(start)
+    const endAt = fromOrdinal(latest)
+    const coverage = {
+      data_start: monthLabel(startAt.year, startAt.month),
+      data_end: monthLabel(endAt.year, endAt.month),
+      months_covered: span.length,
+    }
+
+    const rows: ConsumptionForecastRow[] = []
+    for (const itemId of itemIds) {
+      const info = meta.get(itemId)
+      if (!info) continue // item deleted from the catalog; nothing to label it with
+
+      const stock = position.get(itemId) ?? { opening: 0, remaining: 0 }
+
+      for (const ordinal of span) {
+        const { year, month } = fromOrdinal(ordinal)
+        const bucket = buckets.get(key(itemId, ordinal))
+        rows.push({
+          ...info,
+          year,
+          month,
+          // The last month is still in progress, so its total is not
+          // comparable to the others. Averaging it in unflagged reads as a
+          // downturn that has not happened.
+          is_partial_month: ordinal === latest ? 1 : 0,
+          units_issued: bucket?.issued ?? 0,
+          units_returned: bucket?.returned ?? 0,
+          requests: bucket?.requests.size ?? 0,
+          opening_qty: stock.opening,
+          remaining_qty: stock.remaining,
+          ...coverage,
+        })
+      }
+    }
+
+    rows.sort(
+      (a, b) =>
+        a.item.localeCompare(b.item) ||
+        a.year - b.year ||
+        a.month - b.month
+    )
 
     return { error: null, data: rows }
   } catch (e) {

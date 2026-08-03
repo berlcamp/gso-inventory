@@ -27,11 +27,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Download, Loader2, Boxes, ClipboardList, Building2, Layers } from "lucide-react"
+import { Download, Loader2, Boxes, ClipboardList, Building2, Layers, TrendingUp } from "lucide-react"
 import { getStatusLabel } from "@/components/shared/status-badge"
 import {
   getStockForExport,
   getMovementsForExport,
+  getConsumptionForForecast,
   type CategoryIssuance,
   type MonthlyTrend,
   type OfficeIssuance,
@@ -96,7 +97,9 @@ export function ReportsContent({
   filters: ReportFilterValues
   fiscalYear: number
 }) {
-  const [exporting, setExporting] = useState<"stock" | "movements" | null>(null)
+  const [exporting, setExporting] = useState<
+    "stock" | "movements" | "forecast" | null
+  >(null)
   const { draft, isPending, apply, applyDebounced } = useFilterNav(
     "/dashboard/reports",
     filters
@@ -161,6 +164,50 @@ export function ReportsContent({
           r.performed_by, r.remarks,
         ])
       )
+    )
+  }
+
+  /**
+   * Monthly consumption per item for an external forecasting pass.
+   *
+   * Ignores the filters above it by design — the whole ledger, every office.
+   * Headers are snake_case rather than the Title Case the other two exports
+   * use: this file is read by a machine, not opened in Excel.
+   */
+  async function exportForecast() {
+    setExporting("forecast")
+    const result = await getConsumptionForForecast()
+    setExporting(null)
+
+    if (result.error || result.data.length === 0) {
+      toast.error(result.error ?? "No consumption history to export yet.")
+      return
+    }
+
+    const { data_start, data_end, months_covered } = result.data[0]
+
+    download(
+      `gso-consumption-monthly-${data_start}-to-${data_end}.csv`,
+      toCsv(
+        [
+          "item", "category", "unit", "year", "month", "is_partial_month",
+          "units_issued", "units_returned", "requests",
+          "opening_qty", "remaining_qty", "reorder_level",
+          "data_start", "data_end", "months_covered",
+        ],
+        result.data.map((r) => [
+          r.item, r.category, r.unit, r.year, r.month, r.is_partial_month,
+          r.units_issued, r.units_returned, r.requests,
+          r.opening_qty, r.remaining_qty, r.reorder_level,
+          r.data_start, r.data_end, r.months_covered,
+        ])
+      )
+    )
+
+    toast.success(
+      `${result.data.length.toLocaleString()} rows covering ${months_covered} month${
+        months_covered === 1 ? "" : "s"
+      } (${data_start} to ${data_end}).`
     )
   }
 
@@ -264,6 +311,23 @@ export function ReportsContent({
               <Download className="h-3.5 w-3.5" />
             )}
             Ledger CSV
+          </Button>
+          {/* Label says "all data" because this one ignores the filters sitting
+              next to it — a truncated window is how this file goes wrong. */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportForecast}
+            disabled={exporting !== null}
+            title="Monthly consumption per item for forecasting. Always covers every office and the whole ledger, ignoring the filters above."
+            className="gap-1.5"
+          >
+            {exporting === "forecast" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <TrendingUp className="h-3.5 w-3.5" />
+            )}
+            Forecast CSV (all data)
           </Button>
         </div>
       </div>
