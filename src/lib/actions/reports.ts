@@ -194,6 +194,7 @@ export async function getRequestStatusCounts(
   filters: ReportFilters
 ): Promise<ActionResult<Record<RequestStatus, number>>> {
   const empty: Record<RequestStatus, number> = {
+    awaiting_endorsement: 0,
     pending: 0,
     approved: 0,
     partially_released: 0,

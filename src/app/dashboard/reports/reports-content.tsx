@@ -53,6 +53,7 @@ const MONTHS = [
 ]
 
 const STATUS_ORDER: RequestStatus[] = [
+  "awaiting_endorsement",
   "pending",
   "approved",
   "partially_released",

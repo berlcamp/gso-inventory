@@ -6,6 +6,7 @@ import type { RequestAction, RequestLogRow } from "@/types/database"
 
 const actionConfig: Record<RequestAction, { dot: string; label: string }> = {
   submitted: { dot: "bg-yellow-500", label: "submitted" },
+  endorsed: { dot: "bg-purple-500", label: "endorsed" },
   approved: { dot: "bg-blue-500", label: "approved" },
   rejected: { dot: "bg-red-500", label: "rejected" },
   released: { dot: "bg-green-500", label: "released" },

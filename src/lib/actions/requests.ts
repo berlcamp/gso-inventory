@@ -6,6 +6,7 @@ import {
   requirePermission,
   toError,
   SCHEMA,
+  type SessionContext,
 } from "@/lib/auth/session"
 import {
   supplyRequestSchema,
@@ -27,6 +28,7 @@ const REQUEST_SELECT = `
   *,
   office:offices!office_id(id, name, code),
   requester:user_profiles!requested_by(id, full_name, email),
+  endorser:user_profiles!endorsed_by(id, full_name),
   reviewer:user_profiles!reviewed_by(id, full_name),
   releaser:user_profiles!released_by(id, full_name)
 `
@@ -35,6 +37,7 @@ const REQUEST_DETAIL_SELECT = `
   *,
   office:offices!office_id(id, name, code),
   requester:user_profiles!requested_by(id, full_name, email),
+  endorser:user_profiles!endorsed_by(id, full_name),
   reviewer:user_profiles!reviewed_by(id, full_name),
   releaser:user_profiles!released_by(id, full_name),
   request_items(
@@ -42,6 +45,46 @@ const REQUEST_DETAIL_SELECT = `
     item:items(*, category:categories(id, name), unit:units(id, code, name))
   )
 `
+
+/* ── Department head helpers ───────────────────────────────────────────── */
+
+/**
+ * A department head acts on their own office only, exactly as a supply officer
+ * is scoped to theirs. `request.view_all` holders (admin, GSO) are deliberately
+ * unscoped so a slip is never stranded when an office's head is unavailable.
+ *
+ * Not exported: a `"use server"` module may only export async functions.
+ */
+function canActForOffice(ctx: SessionContext, officeId: string): boolean {
+  return ctx.canViewAll || ctx.profile.office_id === officeId
+}
+
+/**
+ * Whether the office has anyone who could endorse a request filed for it.
+ *
+ * Filing is refused when it does not — the alternative is a slip that sits at
+ * `awaiting_endorsement` with nobody able to move it, which fails silently
+ * days later instead of at the moment someone can still do something about it.
+ */
+async function officeHasDepartmentHead(
+  ctx: SessionContext,
+  officeId: string
+): Promise<boolean> {
+  const { data } = await ctx.supabase
+    .schema(SCHEMA)
+    .from("user_profiles")
+    .select("id, user_roles(role:roles(code))")
+    .eq("office_id", officeId)
+    .eq("is_active", true)
+
+  const rows = (data ?? []) as unknown as {
+    user_roles: { role: { code: string } | null }[] | null
+  }[]
+
+  return rows.some((profile) =>
+    (profile.user_roles ?? []).some((ur) => ur.role?.code === "department_head")
+  )
+}
 
 /* ── Reads ─────────────────────────────────────────────────────────────── */
 
@@ -238,6 +281,17 @@ export async function createRequest(
     )
     if (problem) return { error: problem, data: null }
 
+    // The office's own department head signs off before GSO sees this, so the
+    // office needs one. Refusing here is louder than letting the slip park at
+    // `awaiting_endorsement` with nobody able to move it.
+    if (!(await officeHasDepartmentHead(ctx, values.office_id))) {
+      return {
+        error:
+          "Your office has no department head assigned yet, so this request has nobody to endorse it. Ask an administrator to assign one.",
+        data: null,
+      }
+    }
+
     const { data: created, error: insertError } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
@@ -246,7 +300,7 @@ export async function createRequest(
         requested_by: ctx.userId,
         requester_name: ctx.profile.full_name,
         source: "system",
-        status: "pending",
+        status: "awaiting_endorsement",
         purpose: values.purpose,
         remarks: values.remarks ?? null,
         fiscal_year: fiscalYear,
@@ -278,7 +332,7 @@ export async function createRequest(
 
     await ctx.supabase.schema(SCHEMA).from("request_logs").insert({
       request_id: created.id,
-      stage: "pending",
+      stage: "awaiting_endorsement",
       action: "submitted",
       actor_id: ctx.userId,
       remarks: values.purpose,
@@ -293,8 +347,84 @@ export async function createRequest(
 }
 
 /**
+ * Endorse a request so it reaches GSO.
+ *
+ * The department head is the requesting office's own second signature: they
+ * send the slip on as filed, or reject it with a reason. Quantities are
+ * deliberately untouched — trimming stays GSO's job at approval, so there is
+ * exactly one place where approved quantities are decided.
+ *
+ * No RPC: endorsing moves no stock, so there is no balance change to keep in
+ * the same transaction as the status change.
+ */
+export async function endorseRequest(
+  requestId: string,
+  remarks?: string
+): Promise<ActionResult> {
+  try {
+    const ctx = await requirePermission("request.endorse")
+
+    const { data: request, error: readError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("id, status, office_id")
+      .eq("id", requestId)
+      .maybeSingle()
+
+    if (readError) return { error: readError.message, data: null }
+    if (!request) return { error: "Request not found.", data: null }
+    if (request.status !== "awaiting_endorsement") {
+      return {
+        error: "Only requests awaiting endorsement can be endorsed.",
+        data: null,
+      }
+    }
+    if (!canActForOffice(ctx, request.office_id as string)) {
+      return {
+        error: "You can only endorse requests from your own office.",
+        data: null,
+      }
+    }
+
+    // The status predicate makes this a no-op if a second head got there
+    // first, rather than stamping a second endorsement over the first.
+    const { error } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .update({
+        status: "pending",
+        endorsed_by: ctx.userId,
+        endorsed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", requestId)
+      .eq("status", "awaiting_endorsement")
+
+    if (error) return { error: error.message, data: null }
+
+    await ctx.supabase.schema(SCHEMA).from("request_logs").insert({
+      request_id: requestId,
+      stage: "pending",
+      action: "endorsed",
+      actor_id: ctx.userId,
+      remarks: remarks?.trim() || null,
+    })
+
+    revalidatePath(`/dashboard/requests/${requestId}`)
+    revalidatePath("/dashboard/requests")
+    revalidatePath("/dashboard")
+    return { error: null, data: null }
+  } catch (e) {
+    return { error: toError(e), data: null }
+  }
+}
+
+/**
  * Approve a pending request. `approvals` maps request_item id → approved
  * quantity, letting GSO trim what the office asked for.
+ *
+ * `pending` means endorsed by the department head, so this needs no extra
+ * check — a request that has not cleared the office is not in this status.
  */
 export async function approveRequest(
   requestId: string,
@@ -314,7 +444,13 @@ export async function approveRequest(
     if (readError) return { error: readError.message, data: null }
     if (!request) return { error: "Request not found.", data: null }
     if (request.status !== "pending") {
-      return { error: `Only pending requests can be approved.`, data: null }
+      return {
+        error:
+          request.status === "awaiting_endorsement"
+            ? "This request is still waiting for its department head's endorsement."
+            : "Only pending requests can be approved.",
+        data: null,
+      }
     }
 
     for (const line of approvals) {
@@ -403,12 +539,18 @@ export async function approveRequest(
   }
 }
 
+/**
+ * Reject a request. Two different people can do this at two different stages:
+ * the requesting office's own department head before it reaches GSO, and GSO
+ * afterwards. Rejection is terminal either way — there is no edit-and-resubmit
+ * flow, so a corrected slip is filed as a new request.
+ */
 export async function rejectRequest(
   requestId: string,
   remarks: string
 ): Promise<ActionResult> {
   try {
-    const ctx = await requirePermission("request.approve")
+    const ctx = await requirePermission("request.approve", "request.endorse")
 
     if (!remarks?.trim()) {
       return { error: "A reason is required when rejecting a request.", data: null }
@@ -417,26 +559,57 @@ export async function rejectRequest(
     const { data: request } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
-      .select("id, status")
+      .select("id, status, office_id")
       .eq("id", requestId)
       .maybeSingle()
 
     if (!request) return { error: "Request not found.", data: null }
-    if (!["pending", "approved"].includes(request.status)) {
+
+    // Which stage it is in decides who may reject it. Holding `request.endorse`
+    // never lets someone reject at GSO's stage, and vice versa.
+    if (request.status === "awaiting_endorsement") {
+      if (!ctx.permissions.includes("request.endorse")) {
+        return {
+          error:
+            "This request has not been endorsed by its department head yet.",
+          data: null,
+        }
+      }
+      if (!canActForOffice(ctx, request.office_id as string)) {
+        return {
+          error: "You can only reject requests from your own office.",
+          data: null,
+        }
+      }
+    } else if (["pending", "approved"].includes(request.status)) {
+      if (!ctx.permissions.includes("request.approve")) {
+        return {
+          error: "You do not have permission to reject this request.",
+          data: null,
+        }
+      }
+    } else {
       return {
-        error: "Only pending or approved requests can be rejected.",
+        error:
+          "Only requests that have not been released yet can be rejected.",
         data: null,
       }
     }
+
+    // The department head's rejection is an endorsement decision, not a GSO
+    // review, so it stamps `endorsed_*` rather than `reviewed_*`.
+    const isEndorsementStage = request.status === "awaiting_endorsement"
+    const now = new Date().toISOString()
 
     const { error } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
       .update({
         status: "rejected",
-        reviewed_by: ctx.userId,
-        reviewed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        ...(isEndorsementStage
+          ? { endorsed_by: ctx.userId, endorsed_at: now }
+          : { reviewed_by: ctx.userId, reviewed_at: now }),
+        updated_at: now,
       })
       .eq("id", requestId)
 
@@ -473,14 +646,22 @@ export async function cancelRequest(
       .maybeSingle()
 
     if (!request) return { error: "Request not found.", data: null }
-    if (request.status !== "pending") {
-      return { error: "Only pending requests can be cancelled.", data: null }
+    // Withdrawable right up to approval — including while it sits with the
+    // department head, which is where a slip filed in error is usually caught.
+    if (!["awaiting_endorsement", "pending"].includes(request.status)) {
+      return {
+        error: "Only requests that have not been approved can be cancelled.",
+        data: null,
+      }
     }
 
     const isOwner =
       request.requested_by === ctx.userId ||
       request.office_id === ctx.profile.office_id
-    if (!isOwner && !ctx.permissions.includes("request.approve")) {
+    const canReview =
+      ctx.permissions.includes("request.approve") ||
+      ctx.permissions.includes("request.endorse")
+    if (!isOwner && !canReview) {
       return { error: "You cannot cancel this request.", data: null }
     }
 

@@ -3,14 +3,19 @@ import { Check, X } from "lucide-react"
 import type { RequestStatus } from "@/types/database"
 
 const FLOW: { status: RequestStatus; label: string }[] = [
-  { status: "pending", label: "Requested" },
+  { status: "awaiting_endorsement", label: "Filed" },
+  { status: "pending", label: "Endorsed" },
   { status: "approved", label: "Approved" },
   { status: "released", label: "Released" },
 ]
 
-/** Terminal states that never reach the end of the happy path. */
+/**
+ * Terminal states that never reach the end of the happy path. Rejection is not
+ * attributed here — either the department head or GSO can reject, and the
+ * history below the stepper already names who did and why.
+ */
 const TERMINAL: Partial<Record<RequestStatus, string>> = {
-  rejected: "Rejected by GSO",
+  rejected: "Rejected",
   cancelled: "Cancelled by the requesting office",
 }
 
@@ -28,10 +33,11 @@ export function RequestStepper({ status }: { status: RequestStatus }) {
     )
   }
 
-  // partially_released sits between approved and released.
+  // partially_released sits between approved and released, so it shows on the
+  // "Approved" step rather than as one of its own.
   const currentIndex =
     status === "partially_released"
-      ? 1
+      ? FLOW.findIndex((s) => s.status === "approved")
       : FLOW.findIndex((s) => s.status === status)
 
   return (

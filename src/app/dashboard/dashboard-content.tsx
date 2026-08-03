@@ -17,6 +17,7 @@ import {
   ClipboardList,
   PackageCheck,
   Boxes,
+  Stamp,
   TrendingDown,
   ArrowRight,
   AlertCircle,
@@ -31,10 +32,20 @@ import type { RequestLogRow } from "@/types/database"
 
 const statCards = [
   {
+    key: "awaitingEndorsement" as const,
+    title: "For Endorsement",
+    icon: Stamp,
+    description: "Waiting on the department head",
+    href: "/dashboard/requests?status=awaiting_endorsement",
+    accent: "border-purple-500",
+    iconBg: "bg-purple-50 text-purple-600",
+    valueCls: "text-purple-700",
+  },
+  {
     key: "pendingRequests" as const,
-    title: "Pending Requests",
+    title: "For GSO Review",
     icon: ClipboardList,
-    description: "Awaiting GSO review",
+    description: "Endorsed, awaiting GSO",
     href: "/dashboard/requests?status=pending",
     accent: "border-amber-500",
     iconBg: "bg-amber-50 text-amber-600",
@@ -97,7 +108,7 @@ export function DashboardContent({
       )}
 
       {/* Stats grid */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {statCards.map((stat) => (
           <Link
             key={stat.key}

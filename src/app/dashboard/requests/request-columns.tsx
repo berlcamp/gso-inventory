@@ -9,7 +9,8 @@ import { StatusBadge } from "@/components/shared/status-badge"
 import type { SupplyRequestRow } from "@/types/database"
 
 export const REQUEST_STATUS_OPTIONS = [
-  { label: "Pending", value: "pending" },
+  { label: "For Endorsement", value: "awaiting_endorsement" },
+  { label: "For GSO Review", value: "pending" },
   { label: "Approved", value: "approved" },
   { label: "Partially Released", value: "partially_released" },
   { label: "Released", value: "released" },

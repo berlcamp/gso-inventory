@@ -5,6 +5,9 @@ import { getSystemSettings } from "@/lib/actions/settings"
 import type { ActionResult, RequestLogRow, RequestStatus } from "@/types/database"
 
 export interface DashboardStats {
+  /** Filed, still with the requesting office's department head. */
+  awaitingEndorsement: number
+  /** Endorsed and on GSO's desk. */
   pendingRequests: number
   awaitingRelease: number
   releasedThisMonth: number
@@ -37,6 +40,7 @@ export interface LowStockEntry {
 }
 
 const PIPELINE_STATUSES: RequestStatus[] = [
+  "awaiting_endorsement",
   "pending",
   "approved",
   "partially_released",
@@ -61,6 +65,14 @@ export async function getDashboardStats(): Promise<
     const monthStart = startOfMonthISO()
     const { data: settings } = await getSystemSettings()
     const lowThreshold = settings.low_stock_threshold
+
+    // `pending` now means "endorsed, on GSO's desk" — the stage before it has
+    // its own status, so this count needs no extra predicate to stay honest.
+    let endorsementQuery = ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "awaiting_endorsement")
 
     let pendingQuery = ctx.supabase
       .schema(SCHEMA)
@@ -96,6 +108,7 @@ export async function getDashboardStats(): Promise<
       .lte("quantity", lowThreshold)
 
     if (scoped) {
+      endorsementQuery = endorsementQuery.eq("office_id", scoped)
       pendingQuery = pendingQuery.eq("office_id", scoped)
       awaitingQuery = awaitingQuery.eq("office_id", scoped)
       releasedQuery = releasedQuery.eq("office_id", scoped)
@@ -103,14 +116,21 @@ export async function getDashboardStats(): Promise<
       lowStockQuery = lowStockQuery.eq("office_id", scoped)
     }
 
-    const [pending, awaiting, releasedMonth, issuedMonth, lowStock] =
-      await Promise.all([
-        pendingQuery,
-        awaitingQuery,
-        releasedQuery,
-        issuedQuery,
-        lowStockQuery,
-      ])
+    const [
+      endorsement,
+      pending,
+      awaiting,
+      releasedMonth,
+      issuedMonth,
+      lowStock,
+    ] = await Promise.all([
+      endorsementQuery,
+      pendingQuery,
+      awaitingQuery,
+      releasedQuery,
+      issuedQuery,
+      lowStockQuery,
+    ])
 
     const unitsIssued = ((issuedMonth.data ?? []) as { quantity: number }[]).reduce(
       (sum, m) => sum + Math.abs(Number(m.quantity)),
@@ -120,6 +140,7 @@ export async function getDashboardStats(): Promise<
     return {
       error: null,
       data: {
+        awaitingEndorsement: endorsement.count ?? 0,
         pendingRequests: pending.count ?? 0,
         awaitingRelease: awaiting.count ?? 0,
         releasedThisMonth: releasedMonth.count ?? 0,

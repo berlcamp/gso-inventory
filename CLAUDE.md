@@ -46,13 +46,34 @@ resulting balance). That ledger is the audit trail and the source for all issuan
 
 ### Request flow
 
-`pending` → `approved` → `released`
+`awaiting_endorsement` → `pending` → `approved` → `released`
+
+A supply officer files; the requesting office's **own department head** endorses it; only
+then does GSO see it. So `pending` means exactly "endorsed, on GSO's desk" and nothing
+else — which is why the extra stage is its own status rather than a flag on `pending`.
+Every GSO-side query already filters on `status`, so they all became correct without
+being touched. A boolean would have left `pending` meaning two things and every GSO read
+having to remember a second predicate; miss one and un-endorsed requests leak to GSO,
+which is the exact bypass this stage exists to prevent.
+
+The head **endorses or rejects only — never adjusts quantities**. Trimming stays GSO's job
+at approval, so there is one place where approved quantities are decided.
 
 Side exits: `rejected`, `cancelled`. `partially_released` sits between approved and released
-when only some of the approved quantity has gone out.
+when only some of the approved quantity has gone out. Rejection is terminal at either
+stage — there is no edit-and-resubmit flow, so a corrected slip is filed as a new request.
+A request is cancellable while `awaiting_endorsement` or `pending`, i.e. right up to GSO's
+approval.
 
-Walk-ins skip the queue: `create_walk_in_release` writes an already-approved request and
-releases it in the same transaction, tagged `source = 'walk_in'`.
+**Filing requires the office to have a department head.** `createRequest` refuses when the
+requesting office has no active user holding the `department_head` role — the slip would
+otherwise park at `awaiting_endorsement` with nobody able to move it, failing silently days
+later instead of at the moment someone can still fix it. Migration 9 is the seed template
+for filling those in; its closing `SELECT` lists the offices that still cannot file.
+
+Walk-ins skip the whole queue: `create_walk_in_release` writes an already-approved request
+and releases it in the same transaction, tagged `source = 'walk_in'`. Counter issuance is
+GSO acting directly, so it is not endorsed and never enters the new stage.
 
 ### Postgres functions (all `SECURITY DEFINER`)
 
@@ -138,7 +159,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, approving, rejecting, cancelling, releasing, walk-ins |
+| `requests.ts` | Filing, endorsing, approving, rejecting, cancelling, releasing, walk-ins |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -167,9 +188,29 @@ Authorization is enforced in server actions, not RLS (RLS gates access to authen
 users only). The key distinction is `request.view_all`:
 
 - Holders (admin, GSO head, GSO custodian) see and act on every office.
-- Without it, a supply officer is scoped to `profile.office_id` for requests, balances, ledger, and dashboard figures.
+- Without it, a supply officer or department head is scoped to `profile.office_id` for requests, balances, ledger, and dashboard figures.
 
-Roles seeded in migration 2: `admin`, `gso_head`, `gso_custodian`, `supply_officer`.
+Roles: `admin`, `gso_head`, `gso_custodian`, `supply_officer` (migration 2) and
+`department_head` (migration 7).
+
+**Department heads** hold `request.endorse` plus `request.view` and `inventory.view` — and
+deliberately **not** `request.create`. Heads review what their supply officer files; they do
+not file themselves, so there is no self-endorsement case to reason about.
+
+"Their department head" is resolved by role plus office: any active user holding
+`department_head` whose `user_profiles.office_id` matches the request's office. There is no
+FK on `offices` for this — `offices.head_name` stays a display label — and an office may
+have more than one head, any of whom can endorse. `endorseRequest` and the endorsement
+branch of `rejectRequest` re-check that office match server-side via `canActForOffice`, so
+a head can never act on another office's slip. `request.view_all` holders are deliberately
+exempt from that scoping, so admin can always unblock a request when an office's head is
+unavailable.
+
+`rejectRequest` serves both stages and picks the rule from the request's current status:
+`awaiting_endorsement` needs `request.endorse` **and** the office match; `pending`/`approved`
+needs `request.approve`. Holding one permission never lets someone reject at the other's
+stage. The head's rejection stamps `endorsed_by`/`endorsed_at` (an endorsement decision),
+GSO's stamps `reviewed_by`/`reviewed_at`.
 
 ### Migrations
 
@@ -181,6 +222,9 @@ Roles seeded in migration 2: `admin`, `gso_head`, `gso_custodian`, `supply_offic
 4. `..._super_admin_setup.sql` — first admin; drops the `user_profiles.id` FK to `auth.users` so placeholder profiles are allowed
 5. `..._seed_supply_officers.sql` — template: fill in each office's Google email
 6. `..._release_request_honor_over_release.sql` — replaces `release_request` so it reads the `allow_over_release` setting instead of always refusing an over-balance release
+7. `..._department_head_approval.sql` — the `awaiting_endorsement` status and `endorsed` action, the `endorsed_by`/`endorsed_at` columns, and the `department_head` role plus `request.endorse`
+8. `..._request_default_awaiting_endorsement.sql` — points `requests.status`'s default at the new stage. Separate from 7 on purpose: Postgres refuses to *use* an enum value in the transaction that added it
+9. `..._seed_department_heads.sql` — template: fill in each office's Google email. Its closing `SELECT` lists offices that still have no head and therefore cannot file
 
 ### Types
 

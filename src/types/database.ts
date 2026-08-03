@@ -10,6 +10,9 @@ export const SCHEMA = "gso_inventory" as const
 /* ── Enums ─────────────────────────────────────────────────────────────── */
 
 export type RequestStatus =
+  /** Filed, waiting on the requesting office's own department head. */
+  | "awaiting_endorsement"
+  /** Endorsed by the department head — now on GSO's desk. */
   | "pending"
   | "approved"
   | "partially_released"
@@ -28,6 +31,7 @@ export type MovementType =
 
 export type RequestAction =
   | "submitted"
+  | "endorsed"
   | "approved"
   | "rejected"
   | "released"
@@ -121,6 +125,9 @@ export interface SupplyRequest {
   remarks: string | null
   fiscal_year: number
   requested_at: string
+  /** The department head's sign-off — distinct from GSO's `reviewed_by`. */
+  endorsed_by: string | null
+  endorsed_at: string | null
   reviewed_by: string | null
   reviewed_at: string | null
   released_by: string | null
@@ -190,6 +197,7 @@ export type RequestItemRow = RequestItem & {
 export type SupplyRequestRow = SupplyRequest & {
   office: Pick<Office, "id" | "name" | "code"> | null
   requester: Pick<UserProfile, "id" | "full_name" | "email"> | null
+  endorser: Pick<UserProfile, "id" | "full_name"> | null
   reviewer: Pick<UserProfile, "id" | "full_name"> | null
   releaser: Pick<UserProfile, "id" | "full_name"> | null
   request_items?: RequestItemRow[]

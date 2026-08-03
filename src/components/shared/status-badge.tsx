@@ -5,8 +5,13 @@ const statusConfig: Record<
   RequestStatus,
   { label: string; dot: string; className: string }
 > = {
+  awaiting_endorsement: {
+    label: "For Endorsement",
+    dot: "bg-purple-500",
+    className: "bg-purple-50 text-purple-800 ring-1 ring-purple-200",
+  },
   pending: {
-    label: "Pending",
+    label: "For GSO Review",
     dot: "bg-yellow-500",
     className: "bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200",
   },

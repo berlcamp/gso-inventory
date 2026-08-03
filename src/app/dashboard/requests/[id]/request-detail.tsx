@@ -40,6 +40,7 @@ import {
   Check,
   Loader2,
   PackageCheck,
+  Stamp,
   X,
   Ban,
 } from "lucide-react"
@@ -47,6 +48,7 @@ import { format } from "date-fns"
 import { usePermissions } from "@/lib/hooks/use-permissions"
 import {
   approveRequest,
+  endorseRequest,
   rejectRequest,
   releaseRequest,
   cancelRequest,
@@ -82,9 +84,12 @@ export function RequestDetail({
   const [error, setError] = useState<string | null>(null)
 
   const lines = request.request_items ?? []
+  const isAwaitingEndorsement = request.status === "awaiting_endorsement"
   const isPending = request.status === "pending"
   const isReleasable =
     request.status === "approved" || request.status === "partially_released"
+  // Withdrawable right up to GSO's approval, at either stage.
+  const isCancellable = isAwaitingEndorsement || isPending
 
   return (
     <div className="space-y-6">
@@ -101,6 +106,21 @@ export function RequestDetail({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <StatusBadge status={request.status} />
             <div className="flex flex-wrap items-center gap-2">
+              {isAwaitingEndorsement && can("request.endorse") && (
+                <>
+                  <EndorseDialog
+                    request={request}
+                    onDone={() => router.refresh()}
+                    onError={setError}
+                  />
+                  <RejectDialog
+                    requestId={request.id}
+                    stage="endorsement"
+                    onDone={() => router.refresh()}
+                    onError={setError}
+                  />
+                </>
+              )}
               {isPending && can("request.approve") && (
                 <>
                   <ApproveDialog
@@ -111,6 +131,7 @@ export function RequestDetail({
                   />
                   <RejectDialog
                     requestId={request.id}
+                    stage="review"
                     onDone={() => router.refresh()}
                     onError={setError}
                   />
@@ -124,7 +145,7 @@ export function RequestDetail({
                   onError={setError}
                 />
               )}
-              {isPending && (
+              {isCancellable && (
                 <CancelButton
                   requestId={request.id}
                   onDone={() => router.refresh()}
@@ -166,6 +187,16 @@ export function RequestDetail({
             />
             <Detail label="Purpose" value={request.purpose} />
             {request.remarks && <Detail label="Remarks" value={request.remarks} />}
+            {request.endorser && (
+              <Detail
+                label="Endorsed by"
+                value={`${request.endorser.full_name}${
+                  request.endorsed_at
+                    ? ` · ${format(new Date(request.endorsed_at), "dd MMM yyyy")}`
+                    : ""
+                }`}
+              />
+            )}
             {request.reviewer && (
               <Detail
                 label="Reviewed by"
@@ -272,6 +303,102 @@ export function RequestDetail({
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/* ── Endorse ───────────────────────────────────────────────────────────── */
+
+/**
+ * The department head's sign-off. Read-only on the quantities by design: the
+ * head endorses the slip as filed or rejects it, and GSO does any trimming at
+ * approval, so there is one place where approved quantities are decided.
+ */
+function EndorseDialog({
+  request,
+  onDone,
+  onError,
+}: {
+  request: SupplyRequestRow
+  onDone: () => void
+  onError: (message: string) => void
+}) {
+  const lines = request.request_items ?? []
+  const [open, setOpen] = useState(false)
+  const [remarks, setRemarks] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleEndorse() {
+    setSubmitting(true)
+    const result = await endorseRequest(request.id, remarks.trim() || undefined)
+    setSubmitting(false)
+
+    if (result.error) {
+      onError(result.error)
+      return
+    }
+    toast.success("Request endorsed. GSO can now review it.")
+    setOpen(false)
+    onDone()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button size="sm" />}>
+        <Stamp className="h-3.5 w-3.5" />
+        Endorse to GSO
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>Endorse Request</DialogTitle>
+          <DialogDescription>
+            Confirms this request on behalf of your office and sends it to GSO.
+            GSO decides the final quantities when it approves.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[45vh] space-y-3 overflow-y-auto py-4">
+          <div className="divide-y divide-border/60 rounded-lg border border-border/60">
+            {lines.map((line) => (
+              <div
+                key={line.id}
+                className="flex items-center justify-between gap-3 px-3 py-2.5"
+              >
+                <p className="min-w-0 truncate text-sm font-medium">
+                  {line.item?.name ?? "—"}
+                </p>
+                <p className="shrink-0 text-sm tabular-nums text-muted-foreground">
+                  {Number(line.quantity_requested).toLocaleString()}{" "}
+                  {line.item?.unit?.code}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-1.5 pt-1">
+            <Label
+              htmlFor="endorse-remarks"
+              className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+            >
+              Remarks
+            </Label>
+            <Textarea
+              id="endorse-remarks"
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value)}
+              placeholder="Optional note recorded in the request history"
+              rows={2}
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button onClick={handleEndorse} disabled={submitting}>
+            {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            Endorse to GSO
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -418,10 +545,13 @@ function ApproveDialog({
 
 function RejectDialog({
   requestId,
+  stage,
   onDone,
   onError,
 }: {
   requestId: string
+  /** Who is rejecting — only changes the wording, the action is the same. */
+  stage: "endorsement" | "review"
   onDone: () => void
   onError: (message: string) => void
 }) {
@@ -457,7 +587,9 @@ function RejectDialog({
         <DialogHeader>
           <DialogTitle>Reject Request</DialogTitle>
           <DialogDescription>
-            The requesting office sees this reason on the request.
+            {stage === "endorsement"
+              ? "This request will not be sent to GSO. Your supply officer sees this reason and can file a corrected request."
+              : "The requesting office sees this reason on the request."}
           </DialogDescription>
         </DialogHeader>
 
