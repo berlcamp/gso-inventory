@@ -12,6 +12,7 @@ import type {
   ItemWithRefs,
   Office,
   OfficeItemHit,
+  OfficeStaff,
   Unit,
 } from "@/types/database"
 
@@ -337,8 +338,19 @@ export async function createUnit(
 
 /* ── Office maintenance ────────────────────────────────────────────────── */
 
+/**
+ * Offices with their active staff, split into the two columns the page shows.
+ *
+ * `heads` is resolved the same way `endorseRequest` resolves "their department
+ * head" — role `department_head` plus a matching `office_id` — so the name on
+ * screen is the person who can actually endorse, not a label someone typed.
+ * An office may have more than one. Anyone else active in the office stays in
+ * `officers`, which keeps its "any active profile" meaning rather than
+ * narrowing to a role: the missing-supply-officer alert is driven off it, and
+ * a head is dropped only so nobody is listed under both columns at once.
+ */
 export async function getOfficesWithOfficers(): Promise<
-  ActionResult<(Office & { officers: { id: string; full_name: string; email: string; position: string | null }[] })[]>
+  ActionResult<(Office & { officers: OfficeStaff[]; heads: OfficeStaff[] })[]>
 > {
   try {
     const ctx = await requireSession()
@@ -348,7 +360,9 @@ export async function getOfficesWithOfficers(): Promise<
       ctx.supabase
         .schema(SCHEMA)
         .from("user_profiles")
-        .select("id, full_name, email, position, office_id, is_active")
+        .select(
+          "id, full_name, email, position, office_id, is_active, user_roles(role:roles(code))"
+        )
         .eq("is_active", true),
     ])
 
@@ -356,33 +370,39 @@ export async function getOfficesWithOfficers(): Promise<
       return { error: officesResult.error.message, data: [] }
     }
 
-    const byOffice = new Map<
-      string,
-      { id: string; full_name: string; email: string; position: string | null }[]
-    >()
-    for (const p of (profilesResult.data ?? []) as {
+    const officersByOffice = new Map<string, OfficeStaff[]>()
+    const headsByOffice = new Map<string, OfficeStaff[]>()
+
+    for (const p of (profilesResult.data ?? []) as unknown as {
       id: string
       full_name: string
       email: string
       position: string | null
       office_id: string | null
+      user_roles: { role: { code: string } | null }[] | null
     }[]) {
       if (!p.office_id) continue
-      const list = byOffice.get(p.office_id) ?? []
+
+      const isHead = (p.user_roles ?? []).some(
+        (ur) => ur.role?.code === "department_head"
+      )
+      const bucket = isHead ? headsByOffice : officersByOffice
+      const list = bucket.get(p.office_id) ?? []
       list.push({
         id: p.id,
         full_name: p.full_name,
         email: p.email,
         position: p.position,
       })
-      byOffice.set(p.office_id, list)
+      bucket.set(p.office_id, list)
     }
 
     return {
       error: null,
       data: ((officesResult.data ?? []) as Office[]).map((o) => ({
         ...o,
-        officers: byOffice.get(o.id) ?? [],
+        officers: officersByOffice.get(o.id) ?? [],
+        heads: headsByOffice.get(o.id) ?? [],
       })),
     }
   } catch (e) {

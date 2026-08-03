@@ -52,6 +52,20 @@ export interface Office {
   updated_at: string
 }
 
+/** One person as the offices page lists them, under either staff column. */
+export interface OfficeStaff {
+  id: string
+  full_name: string
+  email: string
+  position: string | null
+}
+
+/** An office plus the active staff behind it — see `getOfficesWithOfficers`. */
+export type OfficeWithStaff = Office & {
+  officers: OfficeStaff[]
+  heads: OfficeStaff[]
+}
+
 export interface UserProfile {
   id: string
   office_id: string | null

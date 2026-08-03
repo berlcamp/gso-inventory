@@ -38,10 +38,23 @@ import {
 } from "lucide-react"
 import { usePermissions } from "@/lib/hooks/use-permissions"
 import { createOffice, updateOffice } from "@/lib/actions/catalog"
-import type { Office } from "@/types/database"
+import type { Office, OfficeStaff, OfficeWithStaff } from "@/types/database"
 
-type OfficeWithOfficers = Office & {
-  officers: { id: string; full_name: string; email: string; position: string | null }[]
+/** Name over email, as both staff columns render every person. */
+function StaffList({ people }: { people: OfficeStaff[] }) {
+  return (
+    <div className="space-y-0.5">
+      {people.slice(0, 2).map((person) => (
+        <div key={person.id}>
+          <p className="text-sm">{person.full_name}</p>
+          <p className="text-xs text-muted-foreground">{person.email}</p>
+        </div>
+      ))}
+      {people.length > 2 && (
+        <p className="text-xs text-muted-foreground">+{people.length - 2} more</p>
+      )}
+    </div>
+  )
 }
 
 function FieldGroup({
@@ -69,7 +82,7 @@ function FieldGroup({
   )
 }
 
-export function OfficesContent({ offices }: { offices: OfficeWithOfficers[] }) {
+export function OfficesContent({ offices }: { offices: OfficeWithStaff[] }) {
   const router = useRouter()
   const { can } = usePermissions()
   const [search, setSearch] = useState("")
@@ -177,25 +190,17 @@ export function OfficesContent({ offices }: { offices: OfficeWithOfficers[] }) {
                         Not assigned
                       </Link>
                     ) : (
-                      <div className="space-y-0.5">
-                        {office.officers.slice(0, 2).map((officer) => (
-                          <div key={officer.id}>
-                            <p className="text-sm">{officer.full_name}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {officer.email}
-                            </p>
-                          </div>
-                        ))}
-                        {office.officers.length > 2 && (
-                          <p className="text-xs text-muted-foreground">
-                            +{office.officers.length - 2} more
-                          </p>
-                        )}
-                      </div>
+                      <StaffList people={office.officers} />
                     )}
                   </TableCell>
-                  <TableCell className="hidden text-sm text-muted-foreground lg:table-cell">
-                    {office.head_name || "—"}
+                  <TableCell className="hidden lg:table-cell">
+                    {office.heads.length > 0 ? (
+                      <StaffList people={office.heads} />
+                    ) : (
+                      <span className="text-sm text-muted-foreground">
+                        {office.head_name || "—"}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>
                     {office.is_active ? (
