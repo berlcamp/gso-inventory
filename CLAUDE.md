@@ -10,9 +10,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev       # start dev server on http://localhost:3000
 npm run build     # production build
 npm run lint      # ESLint (Next.js config, v9 flat config in eslint.config.mjs)
+npm run test      # Vitest (config in vitest.config.mts — it does not read tsconfig paths)
 ```
 
-There is no test suite.
+The suite covers pure logic only — `src/**/*.test.ts`, currently just
+`src/lib/notifications/feed.test.ts`. Nothing mocks Supabase, so anything worth testing
+has to be extractable as a plain function first; that constraint is the point.
 
 ## Architecture
 
@@ -184,12 +187,15 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 | `reports.ts` | Issuance by office/category, trends, CSV exports |
 | `users.ts` | Admin user management (uses the admin client) |
 | `settings.ts` | System settings |
+| `notifications.ts` | The topbar bell's feed |
 
 Actions return `{ error: string | null, data: ... }` — never throw to the client.
 
-Logic shared *between* action files goes in `src/lib/inventory/` (currently
-`availability.ts`), not in one action file imported by another — a `"use server"` module
-may only export async functions, so a helper living there cannot be exported at all.
+Logic shared *between* action files, or that needs to be unit-testable, goes in a plain
+module under `src/lib/` (`inventory/availability.ts`, `notifications/feed.ts`) rather than
+in one action file imported by another — a `"use server"` module may only export async
+functions, so a helper living there cannot be exported at all. Type-only exports are the
+exception and are fine in an action file, since they erase at compile time.
 
 Every action starts with `requireSession()` or `requirePermission(...)` from
 `src/lib/auth/session.ts`, which resolves the profile and the effective permission codes.
@@ -230,6 +236,47 @@ needs `request.approve`. Holding one permission never lets someone reject at the
 stage. The head's rejection stamps `endorsed_by`/`endorsed_at` (an endorsement decision),
 GSO's stamps `reviewed_by`/`reviewed_at`.
 
+### Notifications
+
+The topbar bell is **derived, not stored**. "Needs your action" is entirely a function of
+`requests.status` plus the viewer's permissions and office, so there is no notifications
+table, no migration, and nothing that can fall out of step with the request it describes.
+The price is that there is no per-item read state — an item leaves the bell when the
+request actually moves, which is the only thing that should clear it.
+
+`getNotifications` fires one bucket per verb the caller's permissions justify, and each
+bucket reuses the *same* predicate the matching action enforces:
+
+| Kind | Permission | Status | Scope |
+|---|---|---|---|
+| `endorse` | `request.endorse` | `awaiting_endorsement` | own office unless `request.view_all` |
+| `review` | `request.approve` | `pending` | own office unless `request.view_all` |
+| `release` | `request.release` | `approved`, `partially_released` | own office unless `request.view_all` |
+| `pickup` | *(filer)* | `approved`, `partially_released` | `requested_by = me` |
+| `outcome` | *(filer)* | `rejected`, `released`, last 7 days | `requested_by = me` |
+
+That reuse is load-bearing: a bell that drifted from its action would advertise work the
+server then refuses, which is worse than no bell.
+
+**The buckets are disjoint by status so their exact counts can simply be summed.**
+`release` and `pickup` are the pair that would collide — both read
+`approved | partially_released` — so `pickup` is skipped entirely for `request.release`
+holders, who get the more actionable verb. `buildFeed` still dedupes defensively and
+discounts only the overlap it can actually observe in the fetched rows, never guessing at
+rows beyond the `.limit(20)`.
+
+Each bucket asks PostgREST for `{ count: "exact" }` alongside its 20 rows, so the badge
+stays honest past the listed slice — a GSO desk with 34 pending slips badges 34, not 20.
+
+The badge counts actionable items **only**. Outcomes are news, and nothing but time clears
+them, so counting them would leave every user with a badge that never reaches zero.
+Actionable rows sort oldest-first (a work queue — longest wait on top); outcomes sort
+newest-first (a feed).
+
+The feed is client state, so `revalidatePath` does not reach it. `NotificationBell`
+refreshes on a 60s poll, on window focus, and on `usePathname()` change — the last is what
+drops the badge the moment you endorse something and land back on the list.
+
 ### Migrations
 
 `supabase/migrations/`, applied in order:
@@ -255,7 +302,7 @@ npx supabase gen types typescript --project-id <id> --schema gso_inventory > src
 ### Component Structure
 
 - `src/components/ui/` — shadcn primitives (do not hand-edit, with one exception below)
-- `src/components/layout/` — `AppSidebar`, `Topbar`, `PageHeader`, `NavigationProgress`
+- `src/components/layout/` — `AppSidebar`, `Topbar`, `NotificationBell`, `PageHeader`, `NavigationProgress`
 - `src/components/shared/` — `StatusBadge`, `MovementBadge`, `RequestStepper`, `TimelineLog`
 - `src/components/tables/` — the TanStack `DataTable` and its toolbar, faceted filter, pagination, sortable header, skeleton, and CSV export
 - `src/components/gso/` — `ItemLineEditor`, the item picker shared by the request and walk-in forms

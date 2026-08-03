@@ -14,7 +14,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { SidebarTrigger } from "@/components/ui/sidebar"
-import { Bell, ChevronDown, LogOut, User } from "lucide-react"
+import { NotificationBell } from "@/components/layout/notification-bell"
+import { ChevronDown, LogOut, User } from "lucide-react"
 
 const SEGMENT_LABELS: Record<string, string> = {
   dashboard: "Dashboard",
@@ -120,13 +121,7 @@ export function Topbar() {
           </span>
         )}
 
-        <button
-          type="button"
-          className="relative rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-          aria-label="Notifications"
-        >
-          <Bell className="h-4 w-4" />
-        </button>
+        <NotificationBell />
 
         <div className="mx-1 h-5 w-px bg-border" />
 
