@@ -18,9 +18,6 @@ import type {
 
 const ITEM_SELECT = `*, category:categories(id, name), unit:units(id, code, name)`
 
-/** How many matches the picker offers at once — the rest need a narrower term. */
-const PICKER_LIMIT = 50
-
 /* ── Lookups (used to populate every dropdown in the app) ──────────────── */
 
 export async function getOffices(
@@ -90,7 +87,7 @@ export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
 }
 
 /**
- * The items an office may actually put on a slip.
+ * The office's whole shelf — every item it may actually put on a slip.
  *
  * Sourced from the office's own `office_stocks` rows rather than the catalog:
  * an item the office holds no allocation for can never be released to it, and
@@ -104,10 +101,16 @@ export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
  * `allow_over_release` widens the list back to the office's full allocation,
  * mirroring the setting's meaning everywhere else: the quantity ceiling is
  * waived, the allocation requirement never is.
+ *
+ * **Unfiltered and uncapped on purpose** — the picker searches it in the
+ * browser. This always read the office's entire shelf and paid a full
+ * `loadAvailability` pass regardless of the search term, so filtering here only
+ * ever threw away work already done, once per keystroke. The result set is
+ * bounded by the catalog (390 items; an office typically holds ~50), which is
+ * why handing the whole thing over is cheaper than searching it repeatedly.
  */
-export async function searchItemsForOffice(
+export async function getOfficeItems(
   officeId: string,
-  query: string,
   mode: ItemPickerMode = "request"
 ): Promise<ActionResult<OfficeItemHit[]>> {
   try {
@@ -119,7 +122,6 @@ export async function searchItemsForOffice(
       return { error: "You can only browse your own office's items.", data: [] }
     }
 
-    const term = query.trim().toLowerCase()
     const { data: settings } = await getSystemSettings()
     const fiscalYear = settings.fiscal_year
 
@@ -150,7 +152,6 @@ export async function searchItemsForOffice(
     const hits: OfficeItemHit[] = []
     for (const row of rows) {
       if (!row.item) continue
-      if (term && !row.item.name.toLowerCase().includes(term)) continue
 
       const balance = Number(row.quantity)
       const committed = availability.get(row.item_id)?.committed ?? 0
@@ -161,7 +162,7 @@ export async function searchItemsForOffice(
     }
 
     hits.sort((a, b) => a.name.localeCompare(b.name))
-    return { error: null, data: hits.slice(0, PICKER_LIMIT) }
+    return { error: null, data: hits }
   } catch (e) {
     return { error: toError(e), data: [] }
   }
@@ -173,7 +174,7 @@ export async function searchItemsForOffice(
  * Only the stock-adjustment dialog wants this: `adjust_stock` opens an
  * allocation row for an item the office has never carried, so replenishing is
  * exactly the case where "the office has none of it" must not hide the item.
- * Requests and walk-ins use `searchItemsForOffice` instead.
+ * Requests and walk-ins use `getOfficeItems` instead.
  */
 export async function searchCatalogForOffice(
   officeId: string,

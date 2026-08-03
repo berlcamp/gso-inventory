@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import {
@@ -12,7 +12,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Loader2, Plus, Search, Trash2, PackageSearch } from "lucide-react"
-import { searchItemsForOffice } from "@/lib/actions/catalog"
+import { getOfficeItems } from "@/lib/actions/catalog"
 import type { ItemPickerMode, OfficeItemHit } from "@/types/database"
 
 export interface EditorLine {
@@ -20,7 +20,7 @@ export interface EditorLine {
   name: string
   unit: string
   category: string
-  /** The mode-appropriate ceiling for this line — see `searchItemsForOffice`. */
+  /** The mode-appropriate ceiling for this line — see `getOfficeItems`. */
   available: number
   balance: number
   committed: number
@@ -63,35 +63,58 @@ export function ItemLineEditor({
     hits: OfficeItemHit[]
     error: string | null
   } | null>(null)
-  const [loading, setLoading] = useState(false)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const trimmed = query.trim()
 
   // Walk-in releases deduct immediately, so the quantity input is hard-capped.
   const enforceAvailable = mode === "walk_in"
 
+  // The whole shelf, once per office — typing then filters it in the browser
+  // with no round trip, so search is instant. The action read every one of the
+  // office's rows on each call anyway, so a per-keystroke fetch was paying full
+  // price to re-derive a list already in hand. Availability is therefore as of
+  // this fetch; that was already true of a line the moment it was added, and
+  // `createRequest` re-checks every quantity server-side at submit.
+  useEffect(() => {
+    if (!officeId) return
+
+    let cancelled = false
+
+    getOfficeItems(officeId, mode)
+      .then((res) => ({ hits: res.data, error: res.error }))
+      .catch(() => ({
+        hits: [],
+        error: "Could not load this office's items. Check your connection.",
+      }))
+      .then(({ hits, error }) => {
+        if (cancelled) return
+        setResults({ officeId, hits, error })
+      })
+
+    // Guards against the responses for two offices landing out of order — the
+    // later request's office would otherwise be overwritten by the earlier one.
+    return () => {
+      cancelled = true
+    }
+  }, [officeId, mode])
+
+  const current = results?.officeId === officeId ? results : null
+
+  // Derived rather than a second state: "results are not for the office on
+  // screen yet" *is* the loading condition, and it re-arms itself the instant
+  // the office changes. A `loading` flag would have to be set from inside the
+  // effect body, which cascades a render before the fetch has even started.
+  const loading = Boolean(officeId) && current === null
+
   // An empty query lists everything the office holds: with the catalog already
   // narrowed to its own allocation the whole shelf is worth showing, and a
   // blank box would otherwise hide how little (or how much) is there.
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!officeId) return
-
-    debounceRef.current = setTimeout(async () => {
-      setLoading(true)
-      const res = await searchItemsForOffice(officeId, trimmed, mode)
-      setLoading(false)
-      setResults({ officeId, hits: res.data, error: res.error })
-    }, 250)
-
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-    }
-  }, [officeId, trimmed, mode])
-
-  const current = results?.officeId === officeId ? results : null
-  const visibleResults = current?.hits ?? []
+  const visibleResults = useMemo(() => {
+    const hits = current?.hits ?? []
+    if (!trimmed) return hits
+    const term = trimmed.toLowerCase()
+    return hits.filter((hit) => hit.name.toLowerCase().includes(term))
+  }, [current, trimmed])
 
   function addItem(hit: OfficeItemHit) {
     if (lines.some((l) => l.item_id === hit.id)) return
