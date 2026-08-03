@@ -234,7 +234,6 @@ function OfficeDialog({
   const [open, setOpen] = useState(false)
   const [name, setName] = useState(office?.name ?? "")
   const [code, setCode] = useState(office?.code ?? "")
-  const [headName, setHeadName] = useState(office?.head_name ?? "")
   const [contact, setContact] = useState(office?.contact_number ?? "")
   const [isActive, setIsActive] = useState(office?.is_active ?? true)
   const [submitting, setSubmitting] = useState(false)
@@ -248,7 +247,6 @@ function OfficeDialog({
     const payload = {
       name: name.trim(),
       code: code.trim(),
-      head_name: headName.trim() || null,
       contact_number: contact.trim() || null,
       is_active: isActive,
     }
@@ -316,15 +314,6 @@ function OfficeDialog({
                 value={code}
                 onChange={(e) => setCode(e.target.value.toUpperCase())}
                 placeholder="CBO"
-              />
-            </FieldGroup>
-
-            <FieldGroup label="Office head" htmlFor="office-head">
-              <Input
-                id="office-head"
-                value={headName}
-                onChange={(e) => setHeadName(e.target.value)}
-                placeholder="Optional"
               />
             </FieldGroup>
 
