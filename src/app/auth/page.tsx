@@ -72,7 +72,7 @@ function LoginForm() {
             <WarehouseIcon className="h-5 w-5 text-white" />
           </div>
           <span className="text-lg font-semibold tracking-tight text-white">
-            GSO Inventory
+            RIS &amp; Inventory
           </span>
         </div>
 
@@ -137,7 +137,7 @@ function LoginForm() {
         <div className="relative flex items-center justify-between border-t border-white/15 pt-6">
           <p className="text-xs text-white/75">LGU Ozamiz City</p>
           <p className="text-xs text-white/75">
-            &copy; {new Date().getFullYear()} GSO Inventory System
+            &copy; {new Date().getFullYear()} RIS &amp; Inventory System
           </p>
         </div>
       </div>
@@ -150,7 +150,7 @@ function LoginForm() {
             <WarehouseIcon className="h-5 w-5 text-white" />
           </div>
           <span className="text-lg font-semibold tracking-tight">
-            GSO Inventory
+            RIS &amp; Inventory
           </span>
         </div>
 

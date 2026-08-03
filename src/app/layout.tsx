@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "GSO Inventory — LGU Ozamiz City",
+  title: "RIS & Inventory — LGU Ozamiz City",
   description:
     "Office Supplies Inventory and Issuance System of the General Services Office, LGU Ozamiz City",
 }

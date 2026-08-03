@@ -1,4 +1,4 @@
-# GSO Inventory System — LGU Ozamiz City
+# RIS & Inventory System — LGU Ozamiz City
 
 Office supplies inventory and issuance for the **General Services Office (GSO)**.
 Departments file supply requests through the system or walk up to the counter; GSO

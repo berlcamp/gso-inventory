@@ -19,7 +19,7 @@ has to be extractable as a plain function first; that constraint is the point.
 
 ## Architecture
 
-**GSO Inventory System** — office supplies inventory and issuance for LGU Ozamiz City,
+**RIS & Inventory System** — office supplies inventory and issuance for LGU Ozamiz City,
 controlled by the General Services Office (GSO). Departments file supply requests
 (through the app or as walk-ins at the counter); GSO reviews, approves, and records the
 release, which draws down the requesting office's remaining balance.

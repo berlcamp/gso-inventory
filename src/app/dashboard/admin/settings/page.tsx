@@ -11,7 +11,7 @@ export default async function SettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        subtitle="System-wide defaults for the GSO Inventory System"
+        subtitle="System-wide defaults for the RIS & Inventory System"
       />
       <SettingsContent settings={result.data} />
     </div>

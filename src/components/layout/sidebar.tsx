@@ -158,7 +158,7 @@ export function AppSidebar() {
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-bold leading-tight text-sidebar-foreground tracking-wide">
-              GSO INVENTORY
+              RIS &amp; INVENTORY
             </p>
             <p className="truncate text-[10px] leading-tight text-sidebar-muted-foreground tracking-wide">
               Ozamiz City
