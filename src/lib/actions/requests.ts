@@ -633,10 +633,19 @@ export async function rejectRequest(
 
 export async function cancelRequest(
   requestId: string,
-  remarks?: string
+  remarks: string
 ): Promise<ActionResult> {
   try {
     const ctx = await requireSession()
+
+    // Terminal, and there is no edit-and-resubmit flow — the reason is the only
+    // record of why the slip stopped, exactly as it is for a rejection.
+    if (!remarks?.trim()) {
+      return {
+        error: "A reason is required when cancelling a request.",
+        data: null,
+      }
+    }
 
     const { data: request } = await ctx.supabase
       .schema(SCHEMA)
@@ -678,7 +687,7 @@ export async function cancelRequest(
       stage: "cancelled",
       action: "cancelled",
       actor_id: ctx.userId,
-      remarks: remarks ?? null,
+      remarks: remarks.trim(),
     })
 
     revalidatePath(`/dashboard/requests/${requestId}`)

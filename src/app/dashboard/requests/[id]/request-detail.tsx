@@ -146,7 +146,7 @@ export function RequestDetail({
                 />
               )}
               {isCancellable && (
-                <CancelButton
+                <CancelDialog
                   requestId={request.id}
                   onDone={() => router.refresh()}
                   onError={setError}
@@ -792,7 +792,13 @@ function ReleaseDialog({
 
 /* ── Cancel ────────────────────────────────────────────────────────────── */
 
-function CancelButton({
+/**
+ * Cancellation is terminal and there is no edit-and-resubmit flow, so the
+ * reason is the only record of why a slip stopped — required here for the same
+ * reason `RejectDialog` requires one. The server enforces it too; this check
+ * only spares a round trip.
+ */
+function CancelDialog({
   requestId,
   onDone,
   onError,
@@ -801,12 +807,17 @@ function CancelButton({
   onDone: () => void
   onError: (message: string) => void
 }) {
+  const [open, setOpen] = useState(false)
+  const [remarks, setRemarks] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   async function handleCancel() {
-    if (!confirm("Cancel this request? This cannot be undone.")) return
+    if (!remarks.trim()) {
+      onError("A reason is required when cancelling a request.")
+      return
+    }
     setSubmitting(true)
-    const result = await cancelRequest(requestId)
+    const result = await cancelRequest(requestId, remarks.trim())
     setSubmitting(false)
 
     if (result.error) {
@@ -814,23 +825,53 @@ function CancelButton({
       return
     }
     toast.success("Request cancelled.")
+    setOpen(false)
     onDone()
   }
 
   return (
-    <Button
-      size="sm"
-      variant="ghost"
-      onClick={handleCancel}
-      disabled={submitting}
-      className="text-muted-foreground hover:text-destructive"
-    >
-      {submitting ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground hover:text-destructive"
+          />
+        }
+      >
         <Ban className="h-3.5 w-3.5" />
-      )}
-      Cancel
-    </Button>
+        Cancel
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>Cancel Request</DialogTitle>
+          <DialogDescription>
+            This cannot be undone — a corrected slip has to be filed as a new
+            request. The reason is recorded on the request&rsquo;s timeline.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="py-4">
+          <Textarea
+            value={remarks}
+            onChange={(e) => setRemarks(e.target.value)}
+            placeholder="Reason for cancellation"
+            rows={3}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="destructive"
+            onClick={handleCancel}
+            disabled={submitting}
+          >
+            {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            Cancel Request
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
