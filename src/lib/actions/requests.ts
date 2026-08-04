@@ -9,8 +9,8 @@ import {
   type SessionContext,
 } from "@/lib/auth/session"
 import {
+  acknowledgeReleaseSchema,
   supplyRequestSchema,
-  walkInReleaseSchema,
 } from "@/lib/schemas/gso"
 import { getSystemSettings } from "@/lib/actions/settings"
 import {
@@ -21,16 +21,22 @@ import type {
   ActionResult,
   ItemAvailability,
   RequestLogRow,
+  RequestReleaseRow,
   SupplyRequestRow,
 } from "@/types/database"
 
+// `request_releases(id, ack_status)` rides along so the list can show where
+// each slip stands with the office that received it. Two columns of a table
+// with a handful of rows per request — cheaper than a second round trip, and
+// PostgREST has no way to aggregate it down to one status server-side.
 const REQUEST_SELECT = `
   *,
   office:offices!office_id(id, name, code),
   requester:user_profiles!requested_by(id, full_name, email),
   endorser:user_profiles!endorsed_by(id, full_name),
   reviewer:user_profiles!reviewed_by(id, full_name),
-  releaser:user_profiles!released_by(id, full_name)
+  releaser:user_profiles!released_by(id, full_name),
+  request_releases(id, ack_status)
 `
 
 const REQUEST_DETAIL_SELECT = `
@@ -161,6 +167,59 @@ export async function getRequestLogs(
 
     if (error) return { error: error.message, data: [] }
     return { error: null, data: (data ?? []) as unknown as RequestLogRow[] }
+  } catch (e) {
+    return { error: toError(e), data: [] }
+  }
+}
+
+/**
+ * Every trip to the counter this request has had, oldest first, with the lines
+ * that went out on each and where it stands with the receiving office.
+ *
+ * Scoped the same way `getRequest` is: releases carry quantities and names, so
+ * they are no more public than the request they belong to.
+ */
+export async function getRequestReleases(
+  requestId: string
+): Promise<ActionResult<RequestReleaseRow[]>> {
+  try {
+    const ctx = await requireSession()
+
+    const { data: request } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("office_id")
+      .eq("id", requestId)
+      .maybeSingle()
+
+    if (!request) return { error: "Request not found.", data: [] }
+    if (!ctx.canViewAll && request.office_id !== ctx.profile.office_id) {
+      return {
+        error: "You can only view your own office's requests.",
+        data: [],
+      }
+    }
+
+    const { data, error } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select(
+        `
+        *,
+        releaser:user_profiles!released_by(id, full_name),
+        acknowledger:user_profiles!acknowledged_by(id, full_name),
+        resolver:user_profiles!dispute_resolved_by(id, full_name),
+        request_release_items(
+          *,
+          item:items(*, category:categories(id, name), unit:units(id, code, name))
+        )
+      `
+      )
+      .eq("request_id", requestId)
+      .order("released_at", { ascending: true })
+
+    if (error) return { error: error.message, data: [] }
+    return { error: null, data: (data ?? []) as unknown as RequestReleaseRow[] }
   } catch (e) {
     return { error: toError(e), data: [] }
   }
@@ -700,13 +759,19 @@ export async function cancelRequest(
 
 /**
  * Record the physical release. Delegates to the `release_request` RPC so the
- * balance deduction, ledger rows, and status transition happen in one
- * transaction — a partial failure can never leave stock half-deducted.
+ * release header, its lines, the balance deduction, the ledger rows, and the
+ * status transition all happen in one transaction — a partial failure can
+ * never leave stock half-deducted, nor a receipt for goods that never moved.
+ *
+ * `receivedBy` is required rather than optional: it is one half of the
+ * two-party record, and a release with nobody named on the receiving end
+ * leaves the acknowledgement below with nobody to point at. The RPC refuses it
+ * too — this check only spares a round trip and phrases it better.
  */
 export async function releaseRequest(
   requestId: string,
   lines: { request_item_id: string; quantity: number }[],
-  receivedBy?: string,
+  receivedBy: string,
   remarks?: string
 ): Promise<ActionResult<{ status: string } | null>> {
   try {
@@ -716,6 +781,12 @@ export async function releaseRequest(
     if (payload.length === 0) {
       return { error: "Enter at least one quantity to release.", data: null }
     }
+    if (!receivedBy?.trim()) {
+      return {
+        error: "Name the person collecting the supplies.",
+        data: null,
+      }
+    }
 
     const { data, error } = await ctx.supabase
       .schema(SCHEMA)
@@ -723,7 +794,7 @@ export async function releaseRequest(
         p_request_id: requestId,
         p_actor_id: ctx.userId,
         p_lines: payload,
-        p_received_by: receivedBy ?? null,
+        p_received_by: receivedBy.trim(),
         p_remarks: remarks ?? null,
       })
 
@@ -740,44 +811,143 @@ export async function releaseRequest(
   }
 }
 
-/** Over-the-counter issuance: create an approved request and release it at once. */
-export async function createWalkInRelease(
+/**
+ * The requesting office's counter-signature on one release.
+ *
+ * Send no `lines` to confirm everything exactly as issued; send every line
+ * with `dispute` to report what actually arrived. A dispute deliberately moves
+ * no stock — it records the office's count and flags the release for GSO, who
+ * reconciles the balance with `adjust_stock`. That keeps the ledger with one
+ * author, so a shortfall surfaces as a visible correction rather than as a
+ * department quietly editing inventory.
+ *
+ * The rules that matter are enforced in the RPC, not here: the acknowledger
+ * cannot be the person who released, and must belong to the receiving office.
+ */
+export async function acknowledgeRelease(
   input: unknown
-): Promise<ActionResult<{ id: string } | null>> {
+): Promise<ActionResult<{ ackStatus: string } | null>> {
   try {
-    const ctx = await requirePermission("request.walk_in")
-    const parsed = walkInReleaseSchema.safeParse(input)
+    const ctx = await requirePermission("request.acknowledge")
+    const parsed = acknowledgeReleaseSchema.safeParse(input)
     if (!parsed.success) {
       return { error: parsed.error.issues[0].message, data: null }
     }
     const values = parsed.data
 
-    const merged = new Map<string, number>()
-    for (const line of values.lines) {
-      merged.set(line.item_id, (merged.get(line.item_id) ?? 0) + line.quantity)
-    }
+    // The request id is only needed to revalidate its page, and the RPC
+    // resolves the release on its own — so a bad id here cannot widen access.
+    const { data: release } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select("request_id")
+      .eq("id", values.release_id)
+      .maybeSingle()
 
     const { data, error } = await ctx.supabase
       .schema(SCHEMA)
-      .rpc("create_walk_in_release", {
-        p_office_id: values.office_id,
+      .rpc("acknowledge_release", {
+        p_release_id: values.release_id,
         p_actor_id: ctx.userId,
-        p_requester_name: values.requester_name,
-        p_purpose: values.purpose ?? null,
-        p_lines: [...merged.entries()].map(([item_id, quantity]) => ({
-          item_id,
-          quantity,
-        })),
+        p_lines: values.lines ?? null,
         p_remarks: values.remarks ?? null,
+        p_dispute: values.dispute,
       })
 
     if (error) return { error: error.message, data: null }
 
+    if (release?.request_id) {
+      revalidatePath(`/dashboard/requests/${release.request_id}`)
+    }
     revalidatePath("/dashboard/requests")
-    revalidatePath("/dashboard/inventory")
-    revalidatePath("/dashboard/movements")
     revalidatePath("/dashboard")
-    return { error: null, data: { id: data as string } }
+    return { error: null, data: { ackStatus: data as string } }
+  } catch (e) {
+    return { error: toError(e), data: null }
+  }
+}
+
+/**
+ * GSO's answer to a reported discrepancy.
+ *
+ * `ack_status` deliberately stays `disputed`: the dispute happened, and
+ * clearing it would erase the record this whole feature exists to keep. What
+ * this writes is that it has been dealt with, and by whom — which is what takes
+ * it off GSO's queue.
+ *
+ * Moves no stock either. If the balance needs correcting, that is a stock
+ * adjustment, made deliberately and visible in the ledger on its own terms.
+ *
+ * No RPC: one row and one log entry, with no balance to keep in the same
+ * transaction — same reasoning as `endorseRequest`.
+ */
+export async function resolveReleaseDispute(
+  releaseId: string,
+  resolution: string
+): Promise<ActionResult> {
+  try {
+    const ctx = await requirePermission("request.release")
+
+    if (!resolution?.trim()) {
+      return {
+        error: "Record how the discrepancy was settled.",
+        data: null,
+      }
+    }
+
+    const { data: release, error: readError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select("id, request_id, ack_status, dispute_resolved_at")
+      .eq("id", releaseId)
+      .maybeSingle()
+
+    if (readError) return { error: readError.message, data: null }
+    if (!release) return { error: "Release not found.", data: null }
+    if (release.ack_status !== "disputed") {
+      return {
+        error: "Only a reported discrepancy can be resolved.",
+        data: null,
+      }
+    }
+    if (release.dispute_resolved_at) {
+      return { error: "This discrepancy has already been resolved.", data: null }
+    }
+
+    const { data: request } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("status")
+      .eq("id", release.request_id as string)
+      .maybeSingle()
+
+    // The predicate makes this a no-op if someone else got there first, rather
+    // than stamping a second resolution over the first.
+    const { error } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .update({
+        dispute_resolved_by: ctx.userId,
+        dispute_resolved_at: new Date().toISOString(),
+        dispute_resolution: resolution.trim(),
+      })
+      .eq("id", releaseId)
+      .is("dispute_resolved_at", null)
+
+    if (error) return { error: error.message, data: null }
+
+    await ctx.supabase.schema(SCHEMA).from("request_logs").insert({
+      request_id: release.request_id,
+      stage: request?.status ?? "released",
+      action: "resolved",
+      actor_id: ctx.userId,
+      remarks: resolution.trim(),
+    })
+
+    revalidatePath(`/dashboard/requests/${release.request_id}`)
+    revalidatePath("/dashboard/requests")
+    revalidatePath("/dashboard")
+    return { error: null, data: null }
   } catch (e) {
     return { error: toError(e), data: null }
   }

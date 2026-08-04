@@ -20,7 +20,22 @@ export type RequestStatus =
   | "rejected"
   | "cancelled"
 
+/**
+ * `walk_in` is **legacy only** — over-the-counter issuance was retired in
+ * migration 12 and nothing can create one again. The value survives because
+ * Postgres cannot drop an enum member and rows already tagged with it are real
+ * history the request page still has to render.
+ */
 export type RequestSource = "system" | "walk_in"
+
+/**
+ * Where a release stands with the office it went to.
+ *
+ * `waived` is written only by migration 14's backfill: those releases happened
+ * before there was anything to sign, so they can never legitimately move out of
+ * `pending` and must not sit in anybody's queue pretending otherwise.
+ */
+export type ReleaseAckStatus = "pending" | "confirmed" | "disputed" | "waived"
 
 export type MovementType =
   | "opening"
@@ -35,6 +50,12 @@ export type RequestAction =
   | "approved"
   | "rejected"
   | "released"
+  /** The receiving office signed for a release as issued. */
+  | "received"
+  /** The receiving office signed, but not for the quantities on the slip. */
+  | "disputed"
+  /** GSO answered a reported discrepancy. */
+  | "resolved"
   | "cancelled"
   | "updated"
 
@@ -162,6 +183,48 @@ export interface RequestItem {
   created_at: string
 }
 
+/**
+ * One trip to the counter — a single `release_request` call.
+ *
+ * Acknowledgement hangs off this rather than off the request because a request
+ * can be handed over in several batches: a flag on `requests` would be wrong
+ * the moment a second batch went out after the first was signed for.
+ */
+export interface RequestRelease {
+  id: string
+  request_id: string
+  /** The custodian's attestation — who says these goods went out. */
+  released_by: string | null
+  released_at: string
+  /** Who they were handed to, as typed by the custodian. */
+  received_by_name: string | null
+  remarks: string | null
+  ack_status: ReleaseAckStatus
+  acknowledged_by: string | null
+  acknowledged_at: string | null
+  ack_remarks: string | null
+  /**
+   * GSO's answer to a reported discrepancy. `ack_status` stays `disputed` —
+   * the dispute happened, and overwriting it would erase the record. These say
+   * it has been dealt with, which is what clears GSO's queue.
+   */
+  dispute_resolved_by: string | null
+  dispute_resolved_at: string | null
+  dispute_resolution: string | null
+  created_at: string
+}
+
+export interface RequestReleaseItem {
+  id: string
+  release_id: string
+  request_item_id: string
+  item_id: string
+  /** What the custodian says went out on this trip. */
+  quantity_issued: number
+  /** What the office says arrived. NULL until someone acknowledges. */
+  quantity_received: number | null
+}
+
 export interface StockMovement {
   id: string
   office_id: string
@@ -170,6 +233,8 @@ export interface StockMovement {
   quantity: number
   balance_after: number
   request_id: string | null
+  /** The trip that produced this row — null for adjustments and openings. */
+  release_id: string | null
   remarks: string | null
   performed_by: string | null
   created_at: string
@@ -215,6 +280,17 @@ export type RequestItemRow = RequestItem & {
   item: ItemWithRefs | null
 }
 
+export type RequestReleaseItemRow = RequestReleaseItem & {
+  item: ItemWithRefs | null
+}
+
+export type RequestReleaseRow = RequestRelease & {
+  releaser: Pick<UserProfile, "id" | "full_name"> | null
+  acknowledger: Pick<UserProfile, "id" | "full_name"> | null
+  resolver: Pick<UserProfile, "id" | "full_name"> | null
+  request_release_items?: RequestReleaseItemRow[]
+}
+
 export type SupplyRequestRow = SupplyRequest & {
   office: Pick<Office, "id" | "name" | "code"> | null
   requester: Pick<UserProfile, "id" | "full_name" | "email"> | null
@@ -222,6 +298,13 @@ export type SupplyRequestRow = SupplyRequest & {
   reviewer: Pick<UserProfile, "id" | "full_name"> | null
   releaser: Pick<UserProfile, "id" | "full_name"> | null
   request_items?: RequestItemRow[]
+  /**
+   * Just enough of each release for the list's Receipt column — the detail
+   * page fetches the full rows separately. Embedded rather than aggregated
+   * because PostgREST cannot roll a child table up to a single status, and a
+   * request has a handful of releases at most.
+   */
+  request_releases?: Pick<RequestRelease, "id" | "ack_status">[]
 }
 
 export type StockMovementRow = StockMovement & {
@@ -266,19 +349,9 @@ export interface ItemAvailability {
 }
 
 /**
- * Which ceiling the item picker enforces — they differ because the two flows
- * hit different checks downstream:
- *
- * - `request`  — filed now, released later, so it must clear `balance -
- *                committed` the way `createRequest`/`approveRequest` do.
- * - `walk_in`  — releases immediately against the raw `balance`, exactly like
- *                the `release_request` RPC it delegates to.
- */
-export type ItemPickerMode = "request" | "walk_in"
-
-/**
  * One item an office may actually draw on, as offered by the picker.
- * `available` is the mode-appropriate ceiling; `balance` and `committed` are
- * carried alongside so the UI can explain where the number came from.
+ * `available` is `balance - committed`, the ceiling `createRequest` and
+ * `approveRequest` enforce; the other two are carried alongside so the UI can
+ * explain where the number came from.
  */
 export type OfficeItemHit = ItemWithRefs & ItemAvailability

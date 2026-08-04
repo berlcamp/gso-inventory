@@ -21,7 +21,6 @@ const SEGMENT_LABELS: Record<string, string> = {
   dashboard: "Dashboard",
   requests: "Requests",
   new: "New",
-  "walk-in": "Walk-in Release",
   inventory: "Inventory",
   movements: "Stock Ledger",
   items: "Items",

@@ -13,14 +13,14 @@ import {
 } from "@/components/ui/table"
 import { Loader2, Plus, Search, Trash2, PackageSearch } from "lucide-react"
 import { getOfficeItems } from "@/lib/actions/catalog"
-import type { ItemPickerMode, OfficeItemHit } from "@/types/database"
+import type { OfficeItemHit } from "@/types/database"
 
 export interface EditorLine {
   item_id: string
   name: string
   unit: string
   category: string
-  /** The mode-appropriate ceiling for this line — see `getOfficeItems`. */
+  /** This line's ceiling — `balance - committed`; see `getOfficeItems`. */
   available: number
   balance: number
   committed: number
@@ -28,30 +28,26 @@ export interface EditorLine {
 }
 
 /**
- * Item picker + quantity table shared by the new-request and walk-in forms.
+ * Item picker + quantity table for the new-request form.
  *
  * The list only ever contains items the office can actually draw right now:
  * the action reads its `office_stocks` allocation and drops anything with
- * nothing left. `available` is that item's ceiling — `balance - committed` for
- * a request, the raw balance for a walk-in, matching the check each flow hits.
+ * nothing left. `available` is `balance - committed`, matching the check
+ * `createRequest` runs at submit.
  *
  * `twoColumn` sits the picker beside the selected lines from `lg` up, so adding
- * an item does not push the table out of view. Opt-in rather than the default:
- * both callers render this at full page width, but only the request form has
- * asked for the split.
+ * an item does not push the table out of view.
  */
 export function ItemLineEditor({
   officeId,
   lines,
   onChange,
-  mode = "request",
   disabled = false,
   twoColumn = false,
 }: {
   officeId: string | null
   lines: EditorLine[]
   onChange: (lines: EditorLine[]) => void
-  mode?: ItemPickerMode
   disabled?: boolean
   twoColumn?: boolean
 }) {
@@ -66,9 +62,6 @@ export function ItemLineEditor({
 
   const trimmed = query.trim()
 
-  // Walk-in releases deduct immediately, so the quantity input is hard-capped.
-  const enforceAvailable = mode === "walk_in"
-
   // The whole shelf, once per office — typing then filters it in the browser
   // with no round trip, so search is instant. The action read every one of the
   // office's rows on each call anyway, so a per-keystroke fetch was paying full
@@ -80,7 +73,7 @@ export function ItemLineEditor({
 
     let cancelled = false
 
-    getOfficeItems(officeId, mode)
+    getOfficeItems(officeId)
       .then((res) => ({ hits: res.data, error: res.error }))
       .catch(() => ({
         hits: [],
@@ -96,7 +89,7 @@ export function ItemLineEditor({
     return () => {
       cancelled = true
     }
-  }, [officeId, mode])
+  }, [officeId])
 
   const current = results?.officeId === officeId ? results : null
 
@@ -210,7 +203,7 @@ export function ItemLineEditor({
                       >
                         {hit.available.toLocaleString()} available
                       </span>
-                      {!enforceAvailable && hit.committed > 0 && (
+                      {hit.committed > 0 && (
                         <>
                           {" "}
                           · {hit.balance.toLocaleString()} remaining,{" "}
@@ -303,7 +296,6 @@ export function ItemLineEditor({
                           type="number"
                           min={0}
                           step="any"
-                          max={enforceAvailable ? line.available : undefined}
                           value={line.quantity}
                           disabled={disabled}
                           onChange={(e) =>
@@ -315,9 +307,7 @@ export function ItemLineEditor({
                         />
                         {over && (
                           <p className="mt-1 whitespace-normal text-[11px] text-destructive">
-                            {enforceAvailable
-                              ? "Exceeds remaining balance"
-                              : "Above what is available"}
+                            Above what is available
                           </p>
                         )}
                       </TableCell>

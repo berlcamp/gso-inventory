@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils"
+import { RECEIPT_LABEL, type ReceiptState } from "@/lib/requests/receipt"
 import type { RequestStatus, MovementType } from "@/types/database"
 
 const statusConfig: Record<
@@ -60,6 +61,51 @@ export function StatusBadge({ status }: { status: RequestStatus }) {
 
 export function getStatusLabel(status: RequestStatus): string {
   return statusConfig[status]?.label ?? status
+}
+
+/**
+ * Where a release — or a whole request, once rolled up — stands with the office
+ * that received it. Deliberately a *second* badge rather than more values on
+ * the status one: issuance and acknowledgement are two different questions, and
+ * a slip can be fully released and still unsigned for.
+ */
+const receiptConfig: Record<ReceiptState, { dot: string; className: string }> = {
+  none: {
+    dot: "bg-slate-300",
+    className: "bg-slate-50 text-slate-600 ring-1 ring-slate-200",
+  },
+  pending: {
+    dot: "bg-amber-500",
+    className: "bg-amber-50 text-amber-800 ring-1 ring-amber-200",
+  },
+  disputed: {
+    dot: "bg-rose-500",
+    className: "bg-rose-50 text-rose-800 ring-1 ring-rose-200",
+  },
+  confirmed: {
+    dot: "bg-emerald-500",
+    className: "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200",
+  },
+  waived: {
+    dot: "bg-slate-400",
+    className: "bg-slate-50 text-slate-700 ring-1 ring-slate-200",
+  },
+}
+
+export function ReceiptBadge({ state }: { state: ReceiptState }) {
+  const config = receiptConfig[state]
+  if (!config) return null
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap",
+        config.className
+      )}
+    >
+      <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", config.dot)} />
+      {RECEIPT_LABEL[state]}
+    </span>
+  )
 }
 
 const movementConfig: Record<

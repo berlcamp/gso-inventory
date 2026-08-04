@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo } from "react"
+import { useSearchParams } from "next/navigation"
 import { ClipboardList } from "lucide-react"
 import { format } from "date-fns"
 
@@ -9,9 +10,10 @@ import { ExportCsvButton } from "@/components/tables/export-csv-button"
 import { usePermissions } from "@/lib/hooks/use-permissions"
 import {
   requestColumns,
-  REQUEST_SOURCE_OPTIONS,
+  RECEIPT_FILTER_OPTIONS,
   REQUEST_STATUS_OPTIONS,
 } from "./request-columns"
+import { RECEIPT_LABEL, rollUpReceipt } from "@/lib/requests/receipt"
 import type { Office, SupplyRequestRow } from "@/types/database"
 
 export function RequestsTable({
@@ -22,6 +24,20 @@ export function RequestsTable({
   offices: Office[]
 }) {
   const { can } = usePermissions()
+  const searchParams = useSearchParams()
+
+  // Deep links from the dashboard tiles — `?status=approved`,
+  // `?receipt=pending`. Read once into the table's initial filter state; from
+  // there the toolbar owns it, so clearing a chip does not snap back.
+  const initialColumnFilters = useMemo(() => {
+    const filters: { id: string; value: string[] }[] = []
+    for (const id of ["status", "receipt"] as const) {
+      const value = searchParams.get(id)
+      if (value) filters.push({ id, value: value.split(",") })
+    }
+    return filters
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const officeOptions = useMemo(
     () => offices.map((o) => ({ label: `${o.code} — ${o.name}`, value: o.id })),
@@ -45,10 +61,10 @@ export function RequestsTable({
         ...(canViewAllOffices
           ? [{ id: "office", title: "Office", options: officeOptions }]
           : []),
-        { id: "source", title: "Source", options: REQUEST_SOURCE_OPTIONS },
+        { id: "receipt", title: "Receipt", options: RECEIPT_FILTER_OPTIONS },
       ]}
       initialSorting={[{ id: "filed", desc: true }]}
-      initialColumnVisibility={{ source: false }}
+      initialColumnFilters={initialColumnFilters}
       pageSize={20}
       emptyState={
         <div className="flex flex-col items-center gap-2">
@@ -77,7 +93,10 @@ export function RequestsTable({
             },
             { header: "Purpose", value: (r) => r.purpose },
             { header: "Status", value: (r) => r.status },
-            { header: "Source", value: (r) => r.source },
+            {
+              header: "Receipt",
+              value: (r) => RECEIPT_LABEL[rollUpReceipt(r.request_releases)],
+            },
           ]}
         />
       )}

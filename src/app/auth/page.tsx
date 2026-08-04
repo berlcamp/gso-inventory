@@ -104,12 +104,12 @@ function LoginForm() {
               {
                 icon: <RequestIcon className="h-4 w-4" />,
                 label: "Supply Requests",
-                desc: "Departments file requests online; walk-ins are logged at the counter",
+                desc: "Departments file online; their own head endorses before GSO sees it",
               },
               {
                 icon: <CheckIcon className="h-4 w-4" />,
                 label: "Approval & Release",
-                desc: "GSO approves quantities and records every issuance",
+                desc: "GSO approves and issues; the receiving office signs for what arrived",
               },
               {
                 icon: <LedgerIcon className="h-4 w-4" />,

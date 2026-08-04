@@ -56,6 +56,7 @@ export function DataTable<TData, TValue>({
   emptyState,
   initialSorting = [],
   initialColumnVisibility,
+  initialColumnFilters,
   pageSize = 25,
   fixedLayout = false,
 }: {
@@ -69,6 +70,12 @@ export function DataTable<TData, TValue>({
   emptyState?: React.ReactNode
   initialSorting?: SortingState
   initialColumnVisibility?: VisibilityState
+  /**
+   * Filters the table opens with — for deep links like the dashboard's stat
+   * tiles. Read once on mount, then owned by the toolbar, so clearing a chip
+   * works normally instead of snapping back to the URL.
+   */
+  initialColumnFilters?: ColumnFiltersState
   pageSize?: number
   /**
    * Lay the table out on fixed column widths instead of sizing to content.
@@ -86,7 +93,7 @@ export function DataTable<TData, TValue>({
   const [columnVisibility, setColumnVisibility] =
     React.useState<VisibilityState>(initialColumnVisibility ?? {})
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
-    []
+    initialColumnFilters ?? []
   )
   const [sorting, setSorting] = React.useState<SortingState>(initialSorting)
 

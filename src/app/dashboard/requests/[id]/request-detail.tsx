@@ -19,6 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
@@ -53,9 +54,12 @@ import {
   releaseRequest,
   cancelRequest,
 } from "@/lib/actions/requests"
+import { rollUpReceipt } from "@/lib/requests/receipt"
+import { ReleaseReceipts } from "./release-receipts"
 import type {
   ItemAvailability,
   RequestLogRow,
+  RequestReleaseRow,
   SupplyRequestRow,
 } from "@/types/database"
 
@@ -74,16 +78,19 @@ export function RequestDetail({
   request,
   logs,
   availability,
+  releases,
 }: {
   request: SupplyRequestRow
   logs: RequestLogRow[]
   availability: Record<string, ItemAvailability>
+  releases: RequestReleaseRow[]
 }) {
   const router = useRouter()
   const { can } = usePermissions()
   const [error, setError] = useState<string | null>(null)
 
   const lines = request.request_items ?? []
+  const receipt = rollUpReceipt(releases)
   const isAwaitingEndorsement = request.status === "awaiting_endorsement"
   const isPending = request.status === "pending"
   const isReleasable =
@@ -155,7 +162,7 @@ export function RequestDetail({
             </div>
           </div>
 
-          <RequestStepper status={request.status} />
+          <RequestStepper status={request.status} receipt={receipt} />
         </CardContent>
       </Card>
 
@@ -173,10 +180,11 @@ export function RequestDetail({
               label="Office"
               value={`${request.office?.code ?? ""} — ${request.office?.name ?? ""}`}
             />
-            <Detail
-              label="Source"
-              value={request.source === "walk_in" ? "Walk-in (over the counter)" : "Filed in system"}
-            />
+            {/* Over-the-counter issuance was retired in migration 12; only
+                pre-existing rows can still carry it. */}
+            {request.source === "walk_in" && (
+              <Detail label="Source" value="Walk-in (over the counter)" />
+            )}
             <Detail
               label="Requested by"
               value={request.requester?.full_name ?? request.requester_name}
@@ -290,6 +298,9 @@ export function RequestDetail({
           </CardContent>
         </Card>
       </div>
+
+      {/* Releases — the two-party record of what physically changed hands */}
+      <ReleaseReceipts releases={releases} requestOfficeId={request.office_id} />
 
       {/* History */}
       <Card>
@@ -644,6 +655,7 @@ function ReleaseDialog({
     )
   )
   const [receivedBy, setReceivedBy] = useState("")
+  const [certified, setCertified] = useState(false)
   const [remarks, setRemarks] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -659,12 +671,19 @@ function ReleaseDialog({
       onError("Enter at least one quantity to release.")
       return
     }
+    // Naming the receiver is half of the two-party record — the receiving
+    // office's confirmation has to have someone to point at. The RPC refuses a
+    // blank one too; this only spares a round trip.
+    if (!receivedBy.trim()) {
+      onError("Name the person collecting the supplies.")
+      return
+    }
 
     setSubmitting(true)
     const result = await releaseRequest(
       request.id,
       payload,
-      receivedBy.trim() || undefined,
+      receivedBy.trim(),
       remarks.trim() || undefined
     )
     setSubmitting(false)
@@ -752,7 +771,7 @@ function ReleaseDialog({
               htmlFor="received-by"
               className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
             >
-              Received by
+              Received by <span className="text-destructive">*</span>
             </Label>
             <Input
               id="received-by"
@@ -760,6 +779,10 @@ function ReleaseDialog({
               onChange={(e) => setReceivedBy(e.target.value)}
               placeholder="Name of the person collecting the supplies"
             />
+            <p className="text-xs text-muted-foreground">
+              Their office confirms this delivery separately — someone other
+              than you has to sign that it arrived.
+            </p>
           </div>
 
           <div className="space-y-1.5">
@@ -779,8 +802,23 @@ function ReleaseDialog({
           </div>
         </div>
 
+        {/* Recording a release was already an assertion under this user's name;
+            saying so out loud is what makes it a signature rather than a
+            side effect of filling in a form. */}
+        <label className="flex items-start gap-2.5 rounded-lg border border-border/60 bg-muted/20 p-3 text-sm">
+          <Checkbox
+            checked={certified}
+            onCheckedChange={(value) => setCertified(value === true)}
+            className="mt-0.5"
+          />
+          <span className="text-muted-foreground">
+            I certify that the items and quantities above were physically issued
+            to the person named, and that this is recorded under my name.
+          </span>
+        </label>
+
         <DialogFooter>
-          <Button onClick={handleRelease} disabled={submitting}>
+          <Button onClick={handleRelease} disabled={submitting || !certified}>
             {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Record Release
           </Button>

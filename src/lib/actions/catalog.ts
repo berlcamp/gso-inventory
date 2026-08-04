@@ -8,7 +8,6 @@ import { loadAvailability } from "@/lib/inventory/availability"
 import type {
   ActionResult,
   Category,
-  ItemPickerMode,
   ItemWithRefs,
   Office,
   OfficeItemHit,
@@ -94,9 +93,10 @@ export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
  * one whose balance is already spoken for would only fail at submit. Offering
  * either would be inviting an error, so neither is offered.
  *
- * The ceiling matches whichever check the flow hits downstream — `balance -
- * committed` for a request, raw `balance` for a walk-in — so the number on
- * screen is the number that will be enforced.
+ * The ceiling is `balance - committed`, matching what `createRequest` and
+ * `approveRequest` enforce, so the number on screen is the number that will be
+ * checked at submit. (It used to be mode-dependent because walk-ins released
+ * immediately against the raw balance; that flow was retired in migration 12.)
  *
  * `allow_over_release` widens the list back to the office's full allocation,
  * mirroring the setting's meaning everywhere else: the quantity ceiling is
@@ -110,8 +110,7 @@ export async function getAllItems(): Promise<ActionResult<ItemWithRefs[]>> {
  * why handing the whole thing over is cheaper than searching it repeatedly.
  */
 export async function getOfficeItems(
-  officeId: string,
-  mode: ItemPickerMode = "request"
+  officeId: string
 ): Promise<ActionResult<OfficeItemHit[]>> {
   try {
     const ctx = await requireSession()
@@ -155,7 +154,7 @@ export async function getOfficeItems(
 
       const balance = Number(row.quantity)
       const committed = availability.get(row.item_id)?.committed ?? 0
-      const available = mode === "walk_in" ? balance : balance - committed
+      const available = balance - committed
 
       if (!settings.allow_over_release && available <= 0) continue
       hits.push({ ...row.item, balance, committed, available })
@@ -174,7 +173,7 @@ export async function getOfficeItems(
  * Only the stock-adjustment dialog wants this: `adjust_stock` opens an
  * allocation row for an item the office has never carried, so replenishing is
  * exactly the case where "the office has none of it" must not hide the item.
- * Requests and walk-ins use `getOfficeItems` instead.
+ * Requests use `getOfficeItems` instead.
  */
 export async function searchCatalogForOffice(
   officeId: string,

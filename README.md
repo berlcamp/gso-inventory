@@ -1,9 +1,8 @@
 # RIS & Inventory System — LGU Ozamiz City
 
 Office supplies inventory and issuance for the **General Services Office (GSO)**.
-Departments file supply requests through the system or walk up to the counter; GSO
-approves and records every release, and each office's remaining balance updates as it
-happens.
+Departments file supply requests, GSO approves and records every release, the receiving
+office signs for what arrived, and each office's remaining balance updates as it happens.
 
 ## How it works
 
@@ -12,11 +11,17 @@ Each office carries a **remaining balance per item** for the fiscal year, loaded
 movement is written to a ledger.
 
 ```
-Supply officer files a request  →  GSO approves (may trim quantities)  →  GSO records the release
-                                          ↘ rejects                            ↘ partial release
+Supply officer files  →  Department head endorses  →  GSO approves (may trim quantities)
+                              ↘ rejects                   ↘ rejects
+                                                    →  GSO records the release  ↘ partial release
+                                                    →  Receiving office confirms receipt
+                                                                                ↘ reports a discrepancy
 ```
 
-Walk-ins are recorded in one step and deduct immediately.
+Every handover is signed twice: by GSO when the supplies go out, and by the office that
+received them. The two cannot be the same person. Reporting a discrepancy changes no
+balances — it records what the office counted and flags the release for GSO, who settles
+it with a stock adjustment so the correction stays visible in the ledger.
 
 ## Setup
 
@@ -107,8 +112,13 @@ Unit labels from the sheet were normalized (`BOT`/`BOT.`/`BOTTLE` → `BOTTLE`,
 |---|---|
 | **Administrator** | Everything, including user management |
 | **GSO Head** | View all offices, approve requests, view reports |
-| **GSO Custodian** | Approve, release, walk-ins, adjust balances, maintain catalog and offices |
-| **Supply Officer** | File requests and view balances **for their own office only** |
+| **GSO Custodian** | Approve, release, resolve discrepancies, adjust balances, maintain catalog and offices |
+| **Department Head** | Endorse or reject their own office's requests; confirm receipt |
+| **Supply Officer** | File requests, confirm receipt, view balances **for their own office only** |
+
+Confirming receipt is scoped to the office the supplies went to, and never to the person
+who recorded the release — one account cannot both hand goods over and sign that they
+arrived.
 
 Every office needs at least one supply officer before it can file requests. Add them under
 **Admin → Users** — pick the office and tick *Supply Officer*.
@@ -117,11 +127,10 @@ Every office needs at least one supply officer before it can file requests. Add 
 
 | Route | Purpose |
 |---|---|
-| `/dashboard` | Pending requests, awaiting release, units issued, low stock, pipeline, recent activity |
-| `/dashboard/requests` | All requests with status tabs, office filter, search |
+| `/dashboard` | Pending requests, awaiting release, awaiting confirmation, discrepancies, units issued, low stock, pipeline, recent activity |
+| `/dashboard/requests` | All requests with status and receipt filters, office filter, search |
 | `/dashboard/requests/new` | File a request — item type-ahead showing remaining balance |
-| `/dashboard/requests/[id]` | Approve, reject, release (full or partial), cancel; full history |
-| `/dashboard/walk-in` | Over-the-counter issuance, deducts immediately |
+| `/dashboard/requests/[id]` | Endorse, approve, reject, release (full or partial), cancel; confirm receipt or report a discrepancy per release; full history |
 | `/dashboard/inventory` | Remaining balance per office/item; stock adjustments |
 | `/dashboard/movements` | Stock ledger — every movement, filterable by office, type, and date |
 | `/dashboard/items` | Catalog: items, categories, units, reorder levels |

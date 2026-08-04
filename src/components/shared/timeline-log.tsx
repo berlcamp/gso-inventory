@@ -10,6 +10,9 @@ const actionConfig: Record<RequestAction, { dot: string; label: string }> = {
   approved: { dot: "bg-blue-500", label: "approved" },
   rejected: { dot: "bg-red-500", label: "rejected" },
   released: { dot: "bg-green-500", label: "released" },
+  received: { dot: "bg-emerald-500", label: "confirmed receipt of" },
+  disputed: { dot: "bg-rose-500", label: "reported a discrepancy on" },
+  resolved: { dot: "bg-teal-500", label: "resolved a discrepancy on" },
   cancelled: { dot: "bg-slate-400", label: "cancelled" },
   updated: { dot: "bg-violet-500", label: "updated" },
 }

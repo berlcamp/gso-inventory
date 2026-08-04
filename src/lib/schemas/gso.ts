@@ -22,17 +22,38 @@ export const supplyRequestSchema = z.object({
     .min(1, "Add at least one item to the request."),
 })
 
-export const walkInReleaseSchema = z.object({
-  office_id: z.string().uuid("Select the office collecting the supplies."),
-  requester_name: z
-    .string()
-    .trim()
-    .min(2, "Enter the name of the person collecting.")
-    .max(150),
-  purpose: z.string().trim().max(500).optional().nullable(),
-  remarks: z.string().trim().max(500).optional().nullable(),
-  lines: z.array(requestLineSchema).min(1, "Add at least one item."),
-})
+/**
+ * The requesting office's counter-signature on one release.
+ *
+ * `lines` is optional: omitting it means "everything arrived exactly as
+ * issued", which is what a plain confirmation sends. A discrepancy sends every
+ * line, so the RPC can tell an unanswered line from one answered with zero.
+ */
+export const acknowledgeReleaseSchema = z
+  .object({
+    release_id: z.string().uuid(),
+    dispute: z.boolean().default(false),
+    remarks: z.string().trim().max(500).optional().nullable(),
+    lines: z
+      .array(
+        z.object({
+          release_item_id: z.string().uuid(),
+          quantity_received: z.coerce
+            .number()
+            .min(0, "Received quantity cannot be negative.")
+            .max(1_000_000, "Quantity looks too large."),
+        })
+      )
+      .optional(),
+  })
+  .refine((v) => !v.dispute || (v.remarks ?? "").trim().length > 0, {
+    message: "Describe the discrepancy before reporting it.",
+    path: ["remarks"],
+  })
+  .refine((v) => !v.dispute || (v.lines?.length ?? 0) > 0, {
+    message: "Record what actually arrived for each item.",
+    path: ["lines"],
+  })
 
 export const officeSchema = z.object({
   name: z.string().trim().min(3, "Office name is required.").max(200),
@@ -79,7 +100,7 @@ export const userSchema = z.object({
 })
 
 export type SupplyRequestFormValues = z.infer<typeof supplyRequestSchema>
-export type WalkInReleaseFormValues = z.infer<typeof walkInReleaseSchema>
+export type AcknowledgeReleaseValues = z.infer<typeof acknowledgeReleaseSchema>
 export type OfficeFormValues = z.infer<typeof officeSchema>
 export type ItemFormValues = z.infer<typeof itemSchema>
 export type AdjustStockFormValues = z.infer<typeof adjustStockSchema>

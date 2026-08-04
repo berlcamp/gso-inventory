@@ -10,6 +10,10 @@ export interface DashboardStats {
   /** Endorsed and on GSO's desk. */
   pendingRequests: number
   awaitingRelease: number
+  /** Handed over but not yet signed for by the office that received it. */
+  awaitingConfirmation: number
+  /** Signed for with quantities that did not match, and not yet settled. */
+  openDiscrepancies: number
   releasedThisMonth: number
   unitsIssuedThisMonth: number
   lowStockItems: number
@@ -86,6 +90,30 @@ export async function getDashboardStats(): Promise<
       .select("*", { count: "exact", head: true })
       .in("status", ["approved", "partially_released"])
 
+    // Both keyed on releases rather than requests: acknowledgement is per
+    // handover, so a slip released in two trips can be half signed for. `!inner`
+    // makes the embed a join so the office scope below reaches the request.
+    let unconfirmedQuery = ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select("id, request:requests!request_id!inner(office_id)", {
+        count: "exact",
+        head: true,
+      })
+      .eq("ack_status", "pending")
+
+    // Unresolved only — a discrepancy GSO has already settled is history, and
+    // counting it forever would make the tile mean nothing.
+    let discrepancyQuery = ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select("id, request:requests!request_id!inner(office_id)", {
+        count: "exact",
+        head: true,
+      })
+      .eq("ack_status", "disputed")
+      .is("dispute_resolved_at", null)
+
     let releasedQuery = ctx.supabase
       .schema(SCHEMA)
       .from("requests")
@@ -111,6 +139,8 @@ export async function getDashboardStats(): Promise<
       endorsementQuery = endorsementQuery.eq("office_id", scoped)
       pendingQuery = pendingQuery.eq("office_id", scoped)
       awaitingQuery = awaitingQuery.eq("office_id", scoped)
+      unconfirmedQuery = unconfirmedQuery.eq("request.office_id", scoped)
+      discrepancyQuery = discrepancyQuery.eq("request.office_id", scoped)
       releasedQuery = releasedQuery.eq("office_id", scoped)
       issuedQuery = issuedQuery.eq("office_id", scoped)
       lowStockQuery = lowStockQuery.eq("office_id", scoped)
@@ -120,6 +150,8 @@ export async function getDashboardStats(): Promise<
       endorsement,
       pending,
       awaiting,
+      unconfirmed,
+      discrepancies,
       releasedMonth,
       issuedMonth,
       lowStock,
@@ -127,6 +159,8 @@ export async function getDashboardStats(): Promise<
       endorsementQuery,
       pendingQuery,
       awaitingQuery,
+      unconfirmedQuery,
+      discrepancyQuery,
       releasedQuery,
       issuedQuery,
       lowStockQuery,
@@ -143,6 +177,8 @@ export async function getDashboardStats(): Promise<
         awaitingEndorsement: endorsement.count ?? 0,
         pendingRequests: pending.count ?? 0,
         awaitingRelease: awaiting.count ?? 0,
+        awaitingConfirmation: unconfirmed.count ?? 0,
+        openDiscrepancies: discrepancies.count ?? 0,
         releasedThisMonth: releasedMonth.count ?? 0,
         unitsIssuedThisMonth: unitsIssued,
         lowStockItems: lowStock.count ?? 0,

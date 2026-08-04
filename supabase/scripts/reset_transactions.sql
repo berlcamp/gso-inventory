@@ -28,6 +28,8 @@ SELECT 'request_items',   count(*) FROM gso_inventory.request_items
 UNION ALL
 SELECT 'request_logs',    count(*) FROM gso_inventory.request_logs
 UNION ALL
+SELECT 'request_releases', count(*) FROM gso_inventory.request_releases
+UNION ALL
 SELECT 'movements (non-opening)', count(*) FROM gso_inventory.stock_movements
   WHERE movement_type <> 'opening'
 UNION ALL
@@ -55,7 +57,8 @@ BEGIN;
 DELETE FROM gso_inventory.stock_movements
 WHERE movement_type <> 'opening';
 
--- `request_items` and `request_logs` are ON DELETE CASCADE from here.
+-- `request_items`, `request_logs`, and `request_releases` (with its lines) are
+-- all ON DELETE CASCADE from here.
 DELETE FROM gso_inventory.requests;
 
 -- Balances back to baseline.
@@ -88,7 +91,6 @@ CREATE TEMP TABLE doomed ON COMMIT DROP AS
 SELECT id FROM gso_inventory.requests
 WHERE request_no IN ('RIS-2026-00001', 'RIS-2026-00002');   -- << the ones to undo
 -- Other ways to select them, in place of the request_no list:
---   WHERE source = 'walk_in'
 --   WHERE requested_at >= '2026-08-01'
 --   WHERE office_id = (SELECT id FROM gso_inventory.offices WHERE code = 'GSO')
 

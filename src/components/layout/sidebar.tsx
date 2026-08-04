@@ -18,7 +18,6 @@ import {
   Warehouse,
   LayoutDashboard,
   ClipboardList,
-  PackageOpen,
   Boxes,
   Tags,
   Building2,
@@ -42,12 +41,6 @@ const navItems: NavItem[] = [
     href: "/dashboard/requests",
     icon: ClipboardList,
     permissions: ["request.view", "request.create"],
-  },
-  {
-    title: "Walk-in Release",
-    href: "/dashboard/walk-in",
-    icon: PackageOpen,
-    permissions: ["request.walk_in"],
   },
   {
     title: "Inventory",

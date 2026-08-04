@@ -21,8 +21,12 @@ export type NotificationKind =
   | "endorse"
   /** Endorsed and sitting on GSO's desk. */
   | "review"
+  /** Released to an office that says the quantities were wrong — GSO's to settle. */
+  | "dispute"
   /** Approved — GSO still has to hand it over the counter. */
   | "release"
+  /** Released to your office and not yet signed for. */
+  | "confirm"
   /** Approved — *you* filed it, so it is yours to go and collect. */
   | "pickup"
   /** Finished: rejected or released. News, not a task. */
@@ -30,13 +34,20 @@ export type NotificationKind =
 
 /**
  * Actionable kinds, most urgent first. This order decides both the section
- * order in the panel and — when one request somehow lands in two buckets —
- * which verb wins.
+ * order in the panel and — when one request lands in two buckets — which verb
+ * wins.
+ *
+ * `dispute` outranks `release`: a delivery someone has already said was wrong
+ * is a problem, and problems outrank queues. `confirm` outranks `pickup` for
+ * the same reason from the other side — goods already collected and unsigned
+ * for are a closer obligation than goods still sitting at GSO.
  */
 export const ACTIONABLE_KINDS = [
   "endorse",
   "review",
+  "dispute",
   "release",
+  "confirm",
   "pickup",
 ] as const satisfies readonly NotificationKind[]
 
@@ -87,7 +98,9 @@ export interface NotificationFeed {
 const KIND_HEADLINE: Record<Exclude<NotificationKind, "outcome">, string> = {
   endorse: "Needs your endorsement",
   review: "Waiting for GSO review",
+  dispute: "Delivery discrepancy reported",
   release: "Ready to release",
+  confirm: "Confirm what your office received",
   pickup: "Approved — ready for pickup at GSO",
 }
 
@@ -99,7 +112,9 @@ const OUTCOME_HEADLINE: Partial<Record<RequestStatus, string>> = {
 export const SECTION_LABEL: Record<NotificationKind, string> = {
   endorse: "For your endorsement",
   review: "For GSO review",
+  dispute: "Reported discrepancies",
   release: "For release",
+  confirm: "For receipt confirmation",
   pickup: "Ready for pickup",
   outcome: "Recent",
 }
@@ -176,9 +191,16 @@ export function buildFeed(sources: NotificationSource[]): NotificationFeed {
     // `total` is the count *before* the fetch's `.limit()`, so it can exceed
     // `rows.length` — that is the whole point of asking for it, otherwise a
     // busy GSO desk would show a badge of 20 forever. Subtract only the overlap
-    // actually observed in `rows`: the action builds its buckets on disjoint
-    // status sets, so overlap outside the fetched window cannot exist, and
-    // guessing at it would corrupt an otherwise exact number.
+    // actually observed in `rows`; guessing at unfetched overlap would corrupt
+    // an otherwise exact number.
+    //
+    // The status-keyed buckets are mutually disjoint, so for those the count is
+    // exact. `confirm` and `dispute` are keyed on releases instead and can name
+    // a request another bucket also names — a partially released slip is both
+    // collectable and unsigned-for. Where that overlap falls inside the fetched
+    // window it is discounted here; beyond it the badge can overcount by the
+    // number of collisions in the tail, which is the honest trade for not
+    // inventing a number.
     count += Math.max(0, source.total - (source.rows.length - fresh.length))
   }
 

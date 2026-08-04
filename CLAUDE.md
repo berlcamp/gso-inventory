@@ -20,9 +20,9 @@ has to be extractable as a plain function first; that constraint is the point.
 ## Architecture
 
 **RIS & Inventory System** — office supplies inventory and issuance for LGU Ozamiz City,
-controlled by the General Services Office (GSO). Departments file supply requests
-(through the app or as walk-ins at the counter); GSO reviews, approves, and records the
-release, which draws down the requesting office's remaining balance.
+controlled by the General Services Office (GSO). Departments file supply requests; GSO
+reviews, approves, and records the release, which draws down the requesting office's
+remaining balance; the receiving office then signs for what actually arrived.
 
 Cloned from the MTOP system (`github.com/berlcamp/mtop`) — same stack, layout, auth flow,
 and visual language.
@@ -91,9 +91,51 @@ otherwise park at `awaiting_endorsement` with nobody able to move it, failing si
 later instead of at the moment someone can still fix it. Migration 9 is the seed template
 for filling those in; its closing `SELECT` lists the offices that still cannot file.
 
-Walk-ins skip the whole queue: `create_walk_in_release` writes an already-approved request
-and releases it in the same transaction, tagged `source = 'walk_in'`. Counter issuance is
-GSO acting directly, so it is not endorsed and never enters the new stage.
+**Walk-ins are gone** (migration 12). Over-the-counter issuance used to write an
+already-approved request and release it in one step; it was the only flow that produced an
+issuance nobody in the requesting office ever signed for. `request_source` and
+`requests.source` survive because Postgres cannot drop an enum value and rows tagged
+`walk_in` are real history — but nothing can create one, and `request.walk_in` no longer
+exists.
+
+### Receipt confirmation — the second signature
+
+Recording a release is the custodian's word: `released_by` is stamped by the RPC and
+`received_by_name` is free text the same custodian types in. **Acknowledgement is the
+requesting office's own signature on top of that**, and it hangs off a *release event*,
+not the request — a request can be handed over across several trips, and a single flag on
+`requests` would be wrong the moment a second batch went out after the first was signed
+for. Before migration 14 a batch had no identity at all, so "what went out on Tuesday" was
+not reconstructable.
+
+- `request_releases` — one row per `release_request` call. `ack_status` is
+  `pending | confirmed | disputed | waived`; `waived` is written only by the backfill, for
+  releases that predate the feature and can never legitimately be signed.
+- `request_release_items` — `quantity_issued` (the custodian's count) beside
+  `quantity_received` (the office's).
+- `stock_movements.release_id` ties each ledger row to the trip that produced it.
+
+Two rules live in `acknowledge_release`, not the UI, because they are the point:
+the acknowledger **cannot be the person who released** (a supply officer confirming their
+own handover is no signature at all), and must belong to the **receiving office**.
+`releaseAckEligibility` in `src/lib/requests/receipt.ts` mirrors them so the page can
+explain a hidden button rather than just hiding it; the RPC is the authority.
+
+**A dispute moves no stock.** It records what the office counted and flags the release;
+GSO settles the balance with `adjust_stock`. That keeps the ledger with exactly one author
+and makes a shortfall a visible correction rather than a department editing inventory.
+`quantity_received` is deliberately *not* capped at `quantity_issued` — over-delivery is a
+discrepancy too, and refusing to record it would force the office to sign for a number it
+knows is wrong. Editing a quantity and pressing Confirm still lands as `disputed`: a
+mismatch is a dispute whatever button produced it.
+
+`resolveReleaseDispute` is GSO's answer. It sets `dispute_resolved_*` and leaves
+`ack_status` at `disputed` — the dispute happened, and clearing it would erase the record.
+Resolution exists so the queues can empty: a dispute nobody can close would light the bell
+forever and everyone would learn to ignore it.
+
+Rolled up per request by `rollUpReceipt` (worst-first: disputed → pending → confirmed →
+waived) for the list column, the dashboard tiles, and the stepper's fifth step.
 
 ### Postgres functions (all `SECURITY DEFINER`)
 
@@ -102,9 +144,9 @@ change, the ledger row, and the status transition commit together.
 
 | Function | Purpose |
 |---|---|
-| `release_request(request_id, actor_id, lines, received_by, remarks)` | Deducts each line from the office balance, writes ledger rows, recomputes request status. Rejects releasing more than was approved, and — unless `allow_over_release` is on — more than the balance. |
+| `release_request(request_id, actor_id, lines, received_by, remarks)` | Opens a `request_releases` header, deducts each line from the office balance, writes its release lines and ledger rows, recomputes request status. Rejects releasing more than was approved, more than the balance unless `allow_over_release` is on, and a blank `received_by` — the receiver's name is half of the two-party record. Deletes the header again if no line actually moved, so an empty receipt never lands in anyone's queue. |
+| `acknowledge_release(release_id, actor_id, lines, remarks, dispute)` | The receiving office's counter-signature. Omit `lines` to confirm exactly as issued. Refuses the releaser, another office, a second acknowledgement, a reasonless dispute, and a "dispute" where nothing differs. Writes `received` or `disputed` to `request_logs`. **Moves no stock.** |
 | `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Opening balance, replenishment, return, or manual correction. Signed quantity; refuses to take either the balance or the baseline negative. `movement_type = 'opening'` moves `opening_quantity` in step with `quantity`; every other type moves the balance alone. |
-| `create_walk_in_release(office_id, actor_id, requester_name, purpose, lines, remarks)` | One-step counter issuance; delegates to `release_request`. |
 | `office_stock_issued(fiscal_year, office_id)` | Total released per office+item, summed from the ledger. Read-only. Takes an explicit office filter because it is `SECURITY DEFINER` — callers without `request.view_all` pass their own office. |
 
 ### Balance enforcement
@@ -134,9 +176,10 @@ commitment.
 **The picker never offers what the checks would reject.** `searchItemsForOffice()` reads
 the office's own `office_stocks` rows for the settings fiscal year rather than the
 catalog, so an item the office holds no allocation for — or has nothing left of — is not
-in the list at all. Its ceiling is mode-dependent, matching the check downstream:
-`balance - committed` for `request`, raw `balance` for `walk_in`. An empty query lists the
-office's whole shelf, which is now a useful size.
+in the list at all. Its ceiling is `balance - committed`, matching the check downstream in
+`createRequest`/`approveRequest`. (It used to be mode-dependent — walk-ins capped on the
+raw balance — until migration 12 left one flow.) An empty query lists the office's whole
+shelf, which is now a useful size.
 
 Stock adjustments are the deliberate exception and use `searchCatalogForOffice()` instead:
 `adjust_stock` opens an allocation row for an item the office has never carried, so
@@ -180,7 +223,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, endorsing, approving, rejecting, cancelling, releasing, walk-ins |
+| `requests.ts` | Filing, endorsing, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -291,6 +334,7 @@ drops the badge the moment you endorse something and land back on the list.
 8. `..._request_default_awaiting_endorsement.sql` — points `requests.status`'s default at the new stage. Separate from 7 on purpose: Postgres refuses to *use* an enum value in the transaction that added it
 9. `..._seed_department_heads.sql` — template: fill in each office's Google email. Its closing `SELECT` lists offices that still have no head and therefore cannot file
 10. `..._opening_balance_and_ledger_issued.sql` — replaces `adjust_stock` so the `opening` movement type sets `opening_quantity`, and so the fiscal year comes from `system_settings` rather than the wall clock (it was the last place still reading the calendar year). Adds `office_stock_issued`. Backfills a baseline onto rows an adjustment opened at zero — skipping seeded rows, where `opening_quantity = 0` is a fact from the spreadsheet rather than a missing baseline. Idempotent; its closing `SELECT` lists allocations that still have no baseline
+11. `..._import_hris_department_users.sql` — pre-registers the department-side accounts by reading `hris.user_profiles` directly. The HRIS system shares this Supabase project, so the import is a cross-schema `INSERT … SELECT` rather than a transcribed email list; it maps `department_admin` → `supply_officer` and `department_head` → `department_head`, and leaves `office_id` NULL because the two systems' office codes do not line up one-for-one. An optional commented block at the bottom fills the offices in from the HRIS department code
 
 ### Types
 
@@ -305,7 +349,7 @@ npx supabase gen types typescript --project-id <id> --schema gso_inventory > src
 - `src/components/layout/` — `AppSidebar`, `Topbar`, `NotificationBell`, `PageHeader`, `NavigationProgress`
 - `src/components/shared/` — `StatusBadge`, `MovementBadge`, `RequestStepper`, `TimelineLog`
 - `src/components/tables/` — the TanStack `DataTable` and its toolbar, faceted filter, pagination, sortable header, skeleton, and CSV export
-- `src/components/gso/` — `ItemLineEditor`, the item picker shared by the request and walk-in forms
+- `src/components/gso/` — `ItemLineEditor`, the item picker used by the new-request form
 
 **Local edits to the primitives.** All are reverted by re-running
 `npx shadcn add input|textarea|select|dropdown-menu` — reapply them after.

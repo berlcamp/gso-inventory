@@ -5,8 +5,11 @@ import type { ColumnDef } from "@tanstack/react-table"
 import { formatDistanceToNow } from "date-fns"
 
 import { DataTableColumnHeader } from "@/components/tables/data-table-column-header"
-import { StatusBadge } from "@/components/shared/status-badge"
+import { ReceiptBadge, StatusBadge } from "@/components/shared/status-badge"
+import { rollUpReceipt } from "@/lib/requests/receipt"
 import type { SupplyRequestRow } from "@/types/database"
+
+export { RECEIPT_FILTER_OPTIONS } from "@/lib/requests/receipt"
 
 export const REQUEST_STATUS_OPTIONS = [
   { label: "For Endorsement", value: "awaiting_endorsement" },
@@ -16,11 +19,6 @@ export const REQUEST_STATUS_OPTIONS = [
   { label: "Released", value: "released" },
   { label: "Rejected", value: "rejected" },
   { label: "Cancelled", value: "cancelled" },
-]
-
-export const REQUEST_SOURCE_OPTIONS = [
-  { label: "Filed online", value: "online" },
-  { label: "Walk-in", value: "walk_in" },
 ]
 
 const includesValue = (
@@ -44,6 +42,9 @@ export const requestColumns: ColumnDef<SupplyRequestRow>[] = [
         >
           {row.original.request_no}
         </Link>
+        {/* Walk-in issuance was retired in migration 12 — only rows filed
+            before that can still carry the tag, and they still need labelling
+            for anyone reading back through the year. */}
         {row.original.source === "walk_in" && (
           <span className="ml-1.5 rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 ring-1 ring-violet-200">
             WALK-IN
@@ -126,11 +127,25 @@ export const requestColumns: ColumnDef<SupplyRequestRow>[] = [
     },
   },
   {
-    // Hidden; drives the "Source" filter only.
-    id: "source",
-    accessorKey: "source",
-    header: () => null,
+    // Where the slip stands with the office that received the goods. Rolled up
+    // from its releases, because acknowledgement is per handover and a request
+    // can have several — see `rollUpReceipt` for the precedence.
+    id: "receipt",
+    accessorFn: (row) => rollUpReceipt(row.request_releases),
+    header: ({ column }) => (
+      <DataTableColumnHeader column={column} title="Receipt" />
+    ),
+    cell: ({ getValue }) => {
+      const state = getValue() as ReturnType<typeof rollUpReceipt>
+      if (state === "none") {
+        return <span className="text-xs text-muted-foreground">—</span>
+      }
+      return <ReceiptBadge state={state} />
+    },
     filterFn: includesValue,
-    enableSorting: false,
+    meta: {
+      headerClassName: "hidden lg:table-cell",
+      cellClassName: "hidden lg:table-cell",
+    },
   },
 ]

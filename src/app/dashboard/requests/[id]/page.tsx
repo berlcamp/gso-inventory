@@ -4,6 +4,7 @@ import {
   getRequest,
   getRequestLogs,
   getRequestAvailability,
+  getRequestReleases,
 } from "@/lib/actions/requests"
 import { RequestDetail } from "./request-detail"
 
@@ -29,9 +30,10 @@ export default async function RequestDetailPage({
   }
 
   const request = requestResult.data
-  const [logsResult, availabilityResult] = await Promise.all([
+  const [logsResult, availabilityResult, releasesResult] = await Promise.all([
     getRequestLogs(id),
     getRequestAvailability(id),
+    getRequestReleases(id),
   ])
 
   return (
@@ -44,6 +46,7 @@ export default async function RequestDetailPage({
         request={request}
         logs={logsResult.data}
         availability={availabilityResult.data}
+        releases={releasesResult.data}
       />
     </div>
   )
