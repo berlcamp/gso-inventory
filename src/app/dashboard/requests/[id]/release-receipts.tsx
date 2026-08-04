@@ -85,7 +85,7 @@ export function ReleaseReceipts({
 
   const viewer: ReceiptViewer = {
     userId: session?.userId ?? "",
-    officeId: session?.profile.office_id ?? null,
+    officeIds: session?.officeIds ?? [],
     canAcknowledge: can("request.acknowledge"),
   }
 

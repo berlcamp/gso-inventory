@@ -93,12 +93,24 @@ export async function GET(request: Request) {
       .single()
 
     if (fullProfile) {
-      const { data: preRoles } = await adminSupabase
-        .from("user_roles")
-        .select("role_id")
-        .eq("user_id", fullProfile.id)
+      // Read both sets before the delete. `user_offices` cascades off the
+      // profile row, so without carrying it over a user assigned to several
+      // offices would silently lose all but their primary one the first time
+      // they signed in — the assignment would look right in the admin screen
+      // and be gone from the session.
+      const [{ data: preRoles }, { data: preOffices }] = await Promise.all([
+        adminSupabase
+          .from("user_roles")
+          .select("role_id")
+          .eq("user_id", fullProfile.id),
+        adminSupabase
+          .from("user_offices")
+          .select("office_id")
+          .eq("user_id", fullProfile.id),
+      ])
 
       await adminSupabase.from("user_roles").delete().eq("user_id", fullProfile.id)
+      await adminSupabase.from("user_offices").delete().eq("user_id", fullProfile.id)
       await adminSupabase.from("user_profiles").delete().eq("id", fullProfile.id)
 
       await adminSupabase.from("user_profiles").insert({
@@ -117,6 +129,15 @@ export async function GET(request: Request) {
           preRoles.map((r: { role_id: string }) => ({
             user_id: user.id,
             role_id: r.role_id,
+          }))
+        )
+      }
+
+      if (preOffices && preOffices.length > 0) {
+        await adminSupabase.from("user_offices").insert(
+          preOffices.map((o: { office_id: string }) => ({
+            user_id: user.id,
+            office_id: o.office_id,
           }))
         )
       }

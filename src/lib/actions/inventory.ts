@@ -47,35 +47,49 @@ export async function getAllOfficeStocks(): Promise<
       .order("quantity", { ascending: true })
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) return { error: null, data: [] }
-      query = query.eq("office_id", ctx.profile.office_id)
+      if (ctx.officeIds.length === 0) return { error: null, data: [] }
+      query = query.in("office_id", ctx.officeIds)
     }
 
     // Issuance comes from the ledger, never from `opening_quantity - quantity`:
     // an opening balance moves both columns and a replenishment moves only one,
     // so that subtraction answers "how much has gone out" for exactly one kind
     // of row — the ones the 2026 seed created and nobody has restocked.
+    //
+    // `office_stock_issued` takes one office because it is SECURITY DEFINER and
+    // a caller without `request.view_all` must not be able to ask about
+    // somebody else's. A user in several offices therefore asks once per
+    // office; passing NULL instead would return every office in the city.
     const settings = await getSystemSettings()
-    const [{ data, error }, issuedResult] = await Promise.all([
+    const issuedCalls = ctx.canViewAll
+      ? [null]
+      : ctx.officeIds.map((id) => id as string | null)
+
+    const [{ data, error }, ...issuedResults] = await Promise.all([
       query,
-      ctx.supabase.schema(SCHEMA).rpc("office_stock_issued", {
-        p_fiscal_year: settings.data.fiscal_year,
-        p_office_id: ctx.canViewAll ? null : ctx.profile.office_id,
-      }),
+      ...issuedCalls.map((officeId) =>
+        ctx.supabase.schema(SCHEMA).rpc("office_stock_issued", {
+          p_fiscal_year: settings.data.fiscal_year,
+          p_office_id: officeId,
+        })
+      ),
     ])
 
     if (error) return { error: error.message, data: [] }
-    if (issuedResult.error) {
-      return { error: issuedResult.error.message, data: [] }
+    const issuedFailure = issuedResults.find((r) => r.error)
+    if (issuedFailure?.error) {
+      return { error: issuedFailure.error.message, data: [] }
     }
 
     const issued = new Map<string, number>()
-    for (const row of (issuedResult.data ?? []) as {
-      office_id: string
-      item_id: string
-      issued: number
-    }[]) {
-      issued.set(`${row.office_id}:${row.item_id}`, Number(row.issued))
+    for (const result of issuedResults) {
+      for (const row of (result.data ?? []) as {
+        office_id: string
+        item_id: string
+        issued: number
+      }[]) {
+        issued.set(`${row.office_id}:${row.item_id}`, Number(row.issued))
+      }
     }
 
     const rows = (data ?? []) as unknown as OfficeStockRow[]
@@ -112,8 +126,8 @@ export async function getAllStockMovements(): Promise<
       .order("created_at", { ascending: false })
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) return { error: null, data: empty }
-      query = query.eq("office_id", ctx.profile.office_id)
+      if (ctx.officeIds.length === 0) return { error: null, data: empty }
+      query = query.in("office_id", ctx.officeIds)
     }
 
     const { data, count, error } = await query.range(

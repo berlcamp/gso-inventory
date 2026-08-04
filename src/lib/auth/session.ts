@@ -21,9 +21,14 @@ export interface SessionProfile {
   id: string
   full_name: string
   email: string
+  /**
+   * The **primary** office — what the topbar shows and what a new request
+   * defaults to. Authorization reads `officeIds`, never this: someone can act
+   * for several offices, and this one is only the first among them.
+   */
+  office_id: string | null
   position: string | null
   avatar_url: string | null
-  office_id: string | null
   is_active: boolean
   office: SessionOffice | null
 }
@@ -34,6 +39,20 @@ export interface SessionContext {
   profile: SessionProfile
   roles: string[]
   permissions: string[]
+  /**
+   * Every office this user may act for — **the** office scope, and the only
+   * thing authorization should read.
+   *
+   * The union of `user_offices` and the profile's primary `office_id`. The
+   * union cannot over-grant, since the primary is itself a real assignment,
+   * and it means a membership row that somehow went missing degrades to the
+   * old single-office behaviour rather than locking someone out.
+   *
+   * Empty for a user with no office at all. `canViewAll` holders ignore it.
+   */
+  officeIds: string[]
+  /** The same offices with their names, for pickers and labels. */
+  offices: SessionOffice[]
   /** Convenience: this user may see requests from every office. */
   canViewAll: boolean
   /** From `auth.users` — only used as a fallback when the profile has none. */
@@ -52,6 +71,9 @@ export interface SessionSnapshot {
   profile: SessionProfile
   roles: string[]
   permissions: string[]
+  /** See `SessionContext.officeIds`. */
+  officeIds: string[]
+  offices: SessionOffice[]
 }
 
 /** Shape of the nested role → permission embed below. */
@@ -81,24 +103,30 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
 
   if (!user) throw new Error("Not signed in.")
 
-  // Profile and roles are independent — one round trip, not two. The roles
-  // query walks user_roles → roles → role_permissions → permissions in a
-  // single PostgREST embed instead of the previous two-step fetch.
-  const [{ data: profile }, { data: userRoles }] = await Promise.all([
-    supabase
-      .schema(SCHEMA)
-      .from("user_profiles")
-      .select(
-        "id, full_name, email, position, avatar_url, office_id, is_active, office:offices(id, name, code, is_gso)"
-      )
-      .eq("id", user.id)
-      .maybeSingle(),
-    supabase
-      .schema(SCHEMA)
-      .from("user_roles")
-      .select("role:roles(code, role_permissions(permission:permissions(code)))")
-      .eq("user_id", user.id),
-  ])
+  // Profile, roles, and office memberships are independent — one round trip,
+  // not three. The roles query walks user_roles → roles → role_permissions →
+  // permissions in a single PostgREST embed instead of a two-step fetch.
+  const [{ data: profile }, { data: userRoles }, { data: userOffices }] =
+    await Promise.all([
+      supabase
+        .schema(SCHEMA)
+        .from("user_profiles")
+        .select(
+          "id, full_name, email, position, avatar_url, office_id, is_active, office:offices(id, name, code, is_gso)"
+        )
+        .eq("id", user.id)
+        .maybeSingle(),
+      supabase
+        .schema(SCHEMA)
+        .from("user_roles")
+        .select("role:roles(code, role_permissions(permission:permissions(code)))")
+        .eq("user_id", user.id),
+      supabase
+        .schema(SCHEMA)
+        .from("user_offices")
+        .select("office:offices(id, name, code, is_gso)")
+        .eq("user_id", user.id),
+    ])
 
   if (!profile) throw new Error("No profile is registered for this account.")
   if (profile.is_active === false) throw new Error("This account is deactivated.")
@@ -114,12 +142,32 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
     ),
   ]
 
+  const typedProfile = profile as unknown as SessionProfile
+
+  // Union of the membership rows and the primary office, de-duplicated and
+  // ordered with the primary first so pickers default to it. Including the
+  // primary cannot widen access — it is itself an assignment — and it keeps a
+  // profile whose membership row is missing working exactly as it did before.
+  const officeById = new Map<string, SessionOffice>()
+  if (typedProfile.office) {
+    officeById.set(typedProfile.office.id, typedProfile.office)
+  }
+  for (const row of (userOffices ?? []) as unknown as {
+    office: SessionOffice | null
+  }[]) {
+    if (row.office) officeById.set(row.office.id, row.office)
+  }
+
+  const offices = [...officeById.values()]
+
   return {
     supabase,
     userId: user.id,
-    profile: profile as unknown as SessionProfile,
+    profile: typedProfile,
     roles,
     permissions,
+    officeIds: offices.map((o) => o.id),
+    offices,
     canViewAll: permissions.includes("request.view_all"),
     authEmail: user.email ?? "",
     authAvatarUrl:
@@ -145,6 +193,8 @@ export async function getSessionSnapshot(): Promise<SessionSnapshot | null> {
       profile: ctx.profile,
       roles: ctx.roles,
       permissions: ctx.permissions,
+      officeIds: ctx.officeIds,
+      offices: ctx.offices,
     }
   } catch {
     return null

@@ -55,14 +55,18 @@ const REQUEST_DETAIL_SELECT = `
 /* ── Department head helpers ───────────────────────────────────────────── */
 
 /**
- * A department head acts on their own office only, exactly as a supply officer
- * is scoped to theirs. `request.view_all` holders (admin, GSO) are deliberately
- * unscoped so a slip is never stranded when an office's head is unavailable.
+ * A department head acts on their **own** offices only, exactly as a supply
+ * officer is scoped to theirs. `request.view_all` holders (admin, GSO) are
+ * deliberately unscoped so a slip is never stranded when an office's head is
+ * unavailable.
+ *
+ * `officeIds` is a set because one person can cover several departments — see
+ * `SessionContext.officeIds`.
  *
  * Not exported: a `"use server"` module may only export async functions.
  */
 function canActForOffice(ctx: SessionContext, officeId: string): boolean {
-  return ctx.canViewAll || ctx.profile.office_id === officeId
+  return ctx.canViewAll || ctx.officeIds.includes(officeId)
 }
 
 /**
@@ -76,18 +80,35 @@ async function officeHasDepartmentHead(
   ctx: SessionContext,
   officeId: string
 ): Promise<boolean> {
-  const { data } = await ctx.supabase
-    .schema(SCHEMA)
-    .from("user_profiles")
-    .select("id, user_roles(role:roles(code))")
-    .eq("office_id", officeId)
-    .eq("is_active", true)
+  // Two ways to be in an office: it is your primary, or you hold a membership
+  // row for it. Both are read, matching `SessionContext.officeIds` — a head
+  // who covers this office as their *second* department can endorse for it,
+  // and refusing to count them would block the office from filing at all.
+  const [primary, extra] = await Promise.all([
+    ctx.supabase
+      .schema(SCHEMA)
+      .from("user_profiles")
+      .select("id, user_roles(role:roles(code))")
+      .eq("office_id", officeId)
+      .eq("is_active", true),
+    ctx.supabase
+      .schema(SCHEMA)
+      .from("user_offices")
+      .select("user:user_profiles!inner(id, is_active, user_roles(role:roles(code)))")
+      .eq("office_id", officeId)
+      .eq("user.is_active", true),
+  ])
 
-  const rows = (data ?? []) as unknown as {
-    user_roles: { role: { code: string } | null }[] | null
-  }[]
+  type RoleBearer = { user_roles: { role: { code: string } | null }[] | null }
 
-  return rows.some((profile) =>
+  const candidates: RoleBearer[] = [
+    ...((primary.data ?? []) as unknown as RoleBearer[]),
+    ...((extra.data ?? []) as unknown as { user: RoleBearer | null }[])
+      .map((row) => row.user)
+      .filter((u): u is RoleBearer => u !== null),
+  ]
+
+  return candidates.some((profile) =>
     (profile.user_roles ?? []).some((ur) => ur.role?.code === "department_head")
   )
 }
@@ -112,8 +133,8 @@ export async function getAllRequests(): Promise<
       .order("requested_at", { ascending: false })
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) return { error: null, data: [] }
-      query = query.eq("office_id", ctx.profile.office_id)
+      if (ctx.officeIds.length === 0) return { error: null, data: [] }
+      query = query.in("office_id", ctx.officeIds)
     }
 
     const { data, error } = await query
@@ -142,7 +163,7 @@ export async function getRequest(
 
     const row = data as unknown as SupplyRequestRow
 
-    if (!ctx.canViewAll && row.office_id !== ctx.profile.office_id) {
+    if (!canActForOffice(ctx, row.office_id)) {
       return { error: "You can only view your own office's requests.", data: null }
     }
 
@@ -193,7 +214,7 @@ export async function getRequestReleases(
       .maybeSingle()
 
     if (!request) return { error: "Request not found.", data: [] }
-    if (!ctx.canViewAll && request.office_id !== ctx.profile.office_id) {
+    if (!canActForOffice(ctx, request.office_id as string)) {
       return {
         error: "You can only view your own office's requests.",
         data: [],
@@ -291,11 +312,9 @@ export async function createRequest(
     }
     const values = parsed.data
 
-    // A supply officer may only file for their own office.
-    if (
-      !ctx.permissions.includes("request.view_all") &&
-      values.office_id !== ctx.profile.office_id
-    ) {
+    // A supply officer may only file for an office they are assigned to —
+    // any of them, since one person can cover several departments.
+    if (!canActForOffice(ctx, values.office_id)) {
       return {
         error: "You can only file requests for your own office.",
         data: null,
@@ -725,7 +744,7 @@ export async function cancelRequest(
 
     const isOwner =
       request.requested_by === ctx.userId ||
-      request.office_id === ctx.profile.office_id
+      ctx.officeIds.includes(request.office_id as string)
     const canReview =
       ctx.permissions.includes("request.approve") ||
       ctx.permissions.includes("request.endorse")

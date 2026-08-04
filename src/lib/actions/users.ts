@@ -7,6 +7,23 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { userSchema } from "@/lib/schemas/gso"
 import type { ActionResult, Role, UserProfileRow } from "@/types/database"
 
+/**
+ * The offices a user acts for, primary always included.
+ *
+ * Normalizing here rather than trusting the form keeps the primary and the
+ * membership set from ever disagreeing — `SessionContext.officeIds` unions the
+ * two, so a primary missing from the set would silently still grant access and
+ * the admin screen would be lying about it.
+ *
+ * Not exported: a `"use server"` module may only export async functions.
+ */
+function officeSet(
+  primary: string | null,
+  extra: string[]
+): string[] {
+  return [...new Set([...(primary ? [primary] : []), ...extra])]
+}
+
 export async function getUsers(): Promise<ActionResult<UserProfileRow[]>> {
   try {
     const ctx = await requirePermission("admin.manage")
@@ -15,7 +32,7 @@ export async function getUsers(): Promise<ActionResult<UserProfileRow[]>> {
       .schema(SCHEMA)
       .from("user_profiles")
       .select(
-        "*, office:offices!office_id(id, name, code), user_roles(id, role_id, role:roles(id, name, code, description))"
+        "*, office:offices!office_id(id, name, code), user_roles(id, role_id, role:roles(id, name, code, description)), user_offices(office_id, office:offices!office_id(id, name, code))"
       )
       .order("created_at", { ascending: false })
 
@@ -84,6 +101,19 @@ export async function addUser(input: unknown): Promise<ActionResult> {
       if (roleError) return { error: roleError.message, data: null }
     }
 
+    const offices = officeSet(values.office_id, values.office_ids)
+    if (offices.length > 0) {
+      const { error: officeError } = await adminSupabase
+        .from("user_offices")
+        .insert(
+          offices.map((officeId) => ({
+            user_id: placeholderId,
+            office_id: officeId,
+          }))
+        )
+      if (officeError) return { error: officeError.message, data: null }
+    }
+
     revalidatePath("/dashboard/admin/users")
     revalidatePath("/dashboard/offices")
     return { error: null, data: null }
@@ -123,6 +153,20 @@ export async function updateUser(
         values.role_ids.map((roleId) => ({ user_id: userId, role_id: roleId }))
       )
       if (roleError) return { error: roleError.message, data: null }
+    }
+
+    // Same for the offices — replacing wholesale is what makes un-assigning an
+    // office possible at all.
+    await adminSupabase.from("user_offices").delete().eq("user_id", userId)
+
+    const offices = officeSet(values.office_id, values.office_ids)
+    if (offices.length > 0) {
+      const { error: officeError } = await adminSupabase
+        .from("user_offices")
+        .insert(
+          offices.map((officeId) => ({ user_id: userId, office_id: officeId }))
+        )
+      if (officeError) return { error: officeError.message, data: null }
     }
 
     revalidatePath("/dashboard/admin/users")

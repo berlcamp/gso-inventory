@@ -205,8 +205,41 @@ export in that file.
 OAuth callback at `/auth/callback/route.ts`:
 1. Exchanges the code for a session.
 2. Looks up `gso_inventory.user_profiles` by `id`, then by `email` for pre-registered users.
-3. On first login of a pre-registered user, migrates the placeholder profile to the real auth UID using the admin client.
+3. On first login of a pre-registered user, migrates the placeholder profile to the real auth UID using the admin client. **Both `user_roles` and `user_offices` are read before the delete and re-inserted against the new id** — they cascade off the profile row, so a user assigned to several offices would otherwise lose all but their primary the first time they signed in, with the admin screen still showing the assignment.
 4. Redirects unauthorized or deactivated users to `/auth?error=...` and signs them out.
+
+### Office scope — one person, several departments
+
+`user_profiles.office_id` is the **primary** office: what the topbar shows, what a new
+request defaults to, what the auth callback copies. It is *not* what authorization reads.
+
+`gso_inventory.user_offices` (migration 15) is the set of offices a user acts for.
+**Roles stay global to the user** — `user_roles` says what someone may do, `user_offices`
+says where. That is exactly the "same role in several departments" case; per-office roles
+would mean threading an office argument through every permission check, and nothing needs
+it.
+
+`SessionContext.officeIds` is the **union** of the two, and is the only thing any check
+should read:
+
+- `ctx.officeIds.includes(officeId)` — via `canActForOffice` in `requests.ts`
+- `.in("office_id", ctx.officeIds)` — every scoped list query
+- `releaseAckEligibility` takes `officeIds`, mirroring the RPC
+
+The union cannot over-grant, since the primary is itself a real assignment, and it means a
+membership row that somehow went missing degrades to the old single-office behaviour
+instead of locking someone out of their own office. `acknowledge_release` runs the same
+union in SQL, and it is the authority — the client mirror only exists so the page can
+explain a hidden button.
+
+`updateUser` rewrites both wholesale (that is what makes un-assigning possible) and folds
+the primary into the set, so the two can never disagree.
+
+Consequences worth knowing: `office_stock_issued` takes one office and is `SECURITY
+DEFINER`, so a multi-office user calls it once per office and the results are merged —
+passing NULL would return every office in the city. The new-request form shows an office
+picker as soon as someone covers more than one, and the offices page lists a person under
+every office they cover, not just their primary.
 
 ### Supabase Client Files
 
@@ -290,13 +323,22 @@ request actually moves, which is the only thing that should clear it.
 `getNotifications` fires one bucket per verb the caller's permissions justify, and each
 bucket reuses the *same* predicate the matching action enforces:
 
+"Own offices" below means `ctx.officeIds` — the whole set, not just the primary.
+
 | Kind | Permission | Status | Scope |
 |---|---|---|---|
-| `endorse` | `request.endorse` | `awaiting_endorsement` | own office unless `request.view_all` |
-| `review` | `request.approve` | `pending` | own office unless `request.view_all` |
-| `release` | `request.release` | `approved`, `partially_released` | own office unless `request.view_all` |
+| `endorse` | `request.endorse` | `awaiting_endorsement` | own offices unless `request.view_all` |
+| `review` | `request.approve` | `pending` | own offices unless `request.view_all` |
+| `dispute` | `request.release` | releases `disputed` and unresolved | own offices unless `request.view_all` |
+| `release` | `request.release` | `approved`, `partially_released` | own offices unless `request.view_all` |
+| `confirm` | `request.acknowledge` | releases `pending`, not released by me | own offices; scoped users only |
 | `pickup` | *(filer)* | `approved`, `partially_released` | `requested_by = me` |
 | `outcome` | *(filer)* | `rejected`, `released`, last 7 days | `requested_by = me` |
+
+`confirm` and `dispute` are keyed on **releases**, not requests, so unlike the others they
+can name a request another bucket also names. `buildFeed` discounts the overlap it can
+see; past the fetch window the badge can overcount by the collisions in the tail, which is
+the honest trade for not inventing a number.
 
 That reuse is load-bearing: a bell that drifted from its action would advertise work the
 server then refuses, which is worse than no bell.

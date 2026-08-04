@@ -115,9 +115,10 @@ export async function getOfficeItems(
   try {
     const ctx = await requireSession()
 
-    // A supply officer files only for their own office; don't let the picker
-    // read another office's shelf even though the write path would refuse it.
-    if (!ctx.canViewAll && officeId !== ctx.profile.office_id) {
+    // A supply officer files only for the offices they are assigned to; don't
+    // let the picker read another office's shelf even though the write path
+    // would refuse it.
+    if (!ctx.canViewAll && !ctx.officeIds.includes(officeId)) {
       return { error: "You can only browse your own office's items.", data: [] }
     }
 
@@ -361,7 +362,7 @@ export async function getOfficesWithOfficers(): Promise<
         .schema(SCHEMA)
         .from("user_profiles")
         .select(
-          "id, full_name, email, position, office_id, is_active, user_roles(role:roles(code))"
+          "id, full_name, email, position, office_id, is_active, user_roles(role:roles(code)), user_offices(office_id)"
         )
         .eq("is_active", true),
     ])
@@ -380,21 +381,34 @@ export async function getOfficesWithOfficers(): Promise<
       position: string | null
       office_id: string | null
       user_roles: { role: { code: string } | null }[] | null
+      user_offices: { office_id: string }[] | null
     }[]) {
-      if (!p.office_id) continue
+      // Someone covering two departments belongs under both. Same union as
+      // `SessionContext.officeIds`, so this page shows exactly the people who
+      // can actually act for the office rather than only their primary one.
+      const officeIds = [
+        ...new Set([
+          ...(p.office_id ? [p.office_id] : []),
+          ...(p.user_offices ?? []).map((uo) => uo.office_id),
+        ]),
+      ]
+      if (officeIds.length === 0) continue
 
       const isHead = (p.user_roles ?? []).some(
         (ur) => ur.role?.code === "department_head"
       )
       const bucket = isHead ? headsByOffice : officersByOffice
-      const list = bucket.get(p.office_id) ?? []
-      list.push({
-        id: p.id,
-        full_name: p.full_name,
-        email: p.email,
-        position: p.position,
-      })
-      bucket.set(p.office_id, list)
+
+      for (const officeId of officeIds) {
+        const list = bucket.get(officeId) ?? []
+        list.push({
+          id: p.id,
+          full_name: p.full_name,
+          email: p.email,
+          position: p.position,
+        })
+        bucket.set(officeId, list)
+      }
     }
 
     return {

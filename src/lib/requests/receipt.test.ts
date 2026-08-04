@@ -52,7 +52,7 @@ describe("releaseAckEligibility", () => {
   const OFFICE = "office-1"
   const viewer: ReceiptViewer = {
     userId: "user-1",
-    officeId: OFFICE,
+    officeIds: [OFFICE],
     canAcknowledge: true,
   }
 
@@ -100,9 +100,32 @@ describe("releaseAckEligibility", () => {
     const result = releaseAckEligibility(
       { ack_status: "pending", released_by: "custodian-9" },
       OFFICE,
-      { ...viewer, officeId: null }
+      { ...viewer, officeIds: [] }
     )
     expect(result.canAcknowledge).toBe(false)
+  })
+
+  // One person can cover several departments, so a release to their *second*
+  // office is as much theirs to sign for as one to their primary.
+  it("lets someone sign for any office they cover, not just the first", () => {
+    const result = releaseAckEligibility(
+      { ack_status: "pending", released_by: "custodian-9" },
+      "office-3",
+      { ...viewer, officeIds: ["office-1", "office-3"] }
+    )
+    expect(result).toEqual({ canAcknowledge: true, reason: null })
+  })
+
+  // The two-man rule has to survive the widening: covering the office is not
+  // enough if you are the one who handed the goods over.
+  it("still refuses the releaser in a multi-office assignment", () => {
+    const result = releaseAckEligibility(
+      { ack_status: "pending", released_by: viewer.userId },
+      "office-3",
+      { ...viewer, officeIds: ["office-1", "office-3"] }
+    )
+    expect(result.canAcknowledge).toBe(false)
+    expect(result.reason).toMatch(/someone else/i)
   })
 
   // Already resolved: nothing to do, and no explanation to give — the card

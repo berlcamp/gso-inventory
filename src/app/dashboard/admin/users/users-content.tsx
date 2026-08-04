@@ -285,6 +285,13 @@ function UserDialog({
   const [fullName, setFullName] = useState(user?.full_name ?? "")
   const [position, setPosition] = useState(user?.position ?? "")
   const [officeId, setOfficeId] = useState(user?.office_id ?? "")
+  // Additional offices only — the primary is unioned back in on submit, so the
+  // list below never shows a ticked-and-disabled row for it.
+  const [extraOffices, setExtraOffices] = useState<string[]>(
+    (user?.user_offices ?? [])
+      .map((uo) => uo.office_id)
+      .filter((id) => id !== user?.office_id)
+  )
   const [selectedRoles, setSelectedRoles] = useState<string[]>(
     user?.user_roles?.map((ur) => ur.role_id) ?? []
   )
@@ -296,9 +303,17 @@ function UserDialog({
     ...offices.map((o) => ({ label: `${o.code} — ${o.name}`, value: o.id })),
   ]
 
+  const primaryId = officeId && officeId !== NO_OFFICE ? officeId : null
+
   function toggleRole(roleId: string, checked: boolean) {
     setSelectedRoles((prev) =>
       checked ? [...prev, roleId] : prev.filter((r) => r !== roleId)
+    )
+  }
+
+  function toggleOffice(id: string, checked: boolean) {
+    setExtraOffices((prev) =>
+      checked ? [...prev, id] : prev.filter((o) => o !== id)
     )
   }
 
@@ -310,7 +325,10 @@ function UserDialog({
     const base = {
       full_name: fullName.trim(),
       position: position.trim() || null,
-      office_id: officeId && officeId !== NO_OFFICE ? officeId : null,
+      office_id: primaryId,
+      // The primary can never be in here twice — it is filtered out of the
+      // checkbox list, and the server unions it back in regardless.
+      office_ids: primaryId ? [primaryId, ...extraOffices] : [],
       role_ids: selectedRoles,
     }
 
@@ -395,8 +413,8 @@ function UserDialog({
             </FieldGroup>
 
             <FieldGroup
-              label="Office"
-              hint="Supply officers can only file requests for their own office."
+              label="Primary office"
+              hint="Shown on their profile, and the office a new request defaults to."
             >
               <Select
                 items={officeOptions}
@@ -415,6 +433,46 @@ function UserDialog({
                 </SelectContent>
               </Select>
             </FieldGroup>
+
+            {/* One person can cover several departments with the same roles.
+                The roles above apply in every office ticked here. */}
+            {primaryId && (
+              <FieldGroup
+                label="Also acts for"
+                hint="They can file, endorse, and confirm receipt for these offices too, with the same roles."
+              >
+                <div className="max-h-44 space-y-2.5 overflow-y-auto rounded-lg border border-border/60 bg-muted/30 p-3">
+                  {offices.filter((o) => o.id !== primaryId).length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No other offices to assign.
+                    </p>
+                  ) : (
+                    offices
+                      .filter((o) => o.id !== primaryId)
+                      .map((office) => (
+                        <label
+                          key={office.id}
+                          className="flex items-start gap-2.5"
+                        >
+                          <Checkbox
+                            checked={extraOffices.includes(office.id)}
+                            onCheckedChange={(checked) =>
+                              toggleOffice(office.id, checked === true)
+                            }
+                            className="mt-0.5"
+                          />
+                          <span className="min-w-0 text-sm text-foreground">
+                            <span className="font-mono text-xs text-muted-foreground">
+                              {office.code}
+                            </span>{" "}
+                            {office.name}
+                          </span>
+                        </label>
+                      ))
+                  )}
+                </div>
+              </FieldGroup>
+            )}
 
             <FieldGroup label="Roles">
               <div className="space-y-2.5 rounded-lg border border-border/60 bg-muted/30 p-3">

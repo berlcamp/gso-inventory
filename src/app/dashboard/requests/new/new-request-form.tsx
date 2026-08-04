@@ -26,6 +26,7 @@ import { AlertCircle, ArrowLeft, Loader2, Send } from "lucide-react"
 import { ItemLineEditor, type EditorLine } from "@/components/gso/item-line-editor"
 import { usePermissions } from "@/lib/hooks/use-permissions"
 import { useProfile } from "@/lib/hooks/use-profile"
+import { useSession } from "@/lib/hooks/use-session"
 import { createRequest } from "@/lib/actions/requests"
 import type { Office } from "@/types/database"
 
@@ -58,6 +59,7 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
   const router = useRouter()
   const { profile, isLoading: profileLoading } = useProfile()
   const { can, loading: permsLoading } = usePermissions()
+  const { session } = useSession()
 
   // Defaults to the signed-in user's own office until GSO staff pick another.
   const [officeOverride, setOfficeOverride] = useState<string | null>(null)
@@ -68,10 +70,14 @@ export function NewRequestForm({ offices }: { offices: Office[] }) {
   const [lines, setLines] = useState<EditorLine[]>([])
   const [submitting, setSubmitting] = useState(false)
 
-  // A supply officer files only for their own office; GSO staff choose.
-  const canChooseOffice = can("request.view_all")
+  // GSO staff file for anyone. Everyone else picks from their own offices —
+  // a real choice now that one person can cover several departments, and still
+  // no choice at all in the common single-office case.
+  const canViewAll = can("request.view_all")
+  const ownOffices = session?.offices ?? []
+  const canChooseOffice = canViewAll || ownOffices.length > 1
 
-  const officeOptions = offices.map((o) => ({
+  const officeOptions = (canViewAll ? offices : ownOffices).map((o) => ({
     label: `${o.code} — ${o.name}`,
     value: o.id,
   }))

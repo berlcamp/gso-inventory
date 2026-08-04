@@ -89,6 +89,10 @@ export type OfficeWithStaff = Office & {
 
 export interface UserProfile {
   id: string
+  /**
+   * The **primary** office — display and defaults only. A user can act for
+   * several offices; `user_offices` is what authorization reads.
+   */
   office_id: string | null
   full_name: string
   email: string
@@ -324,8 +328,17 @@ export type RequestLogRow = RequestLog & {
 }
 
 export type UserProfileRow = UserProfile & {
+  /** The primary office. Authorization reads `user_offices`, not this. */
   office: Pick<Office, "id" | "name" | "code"> | null
   user_roles?: { id: string; role_id: string; role: Role | null }[]
+  /**
+   * Every office this person acts for, primary included — one person can cover
+   * several departments with the same roles.
+   */
+  user_offices?: {
+    office_id: string
+    office: Pick<Office, "id" | "name" | "code"> | null
+  }[]
 }
 
 /* ── Action result envelope — actions never throw to the client ────────── */

@@ -66,7 +66,8 @@ export const RECEIPT_FILTER_OPTIONS = (
 
 export interface ReceiptViewer {
   userId: string
-  officeId: string | null
+  /** Every office this person acts for — see `SessionContext.officeIds`. */
+  officeIds: string[]
   canAcknowledge: boolean
 }
 
@@ -94,14 +95,15 @@ export function releaseAckEligibility(
   if (release.ack_status !== "pending") {
     return { canAcknowledge: false, reason: null }
   }
-  if (!viewer.canAcknowledge || !viewer.officeId) {
+  if (!viewer.canAcknowledge || viewer.officeIds.length === 0) {
     return {
       canAcknowledge: false,
       reason:
         "Only the receiving office's supply officer or department head can confirm a release.",
     }
   }
-  if (viewer.officeId !== requestOfficeId) {
+  // Any of the offices this person covers, not just their primary one.
+  if (!viewer.officeIds.includes(requestOfficeId)) {
     return {
       canAcknowledge: false,
       reason: "Only the office that received these supplies can confirm them.",

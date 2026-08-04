@@ -61,8 +61,8 @@ export async function getDashboardStats(): Promise<
 > {
   try {
     const ctx = await requireSession()
-    const scoped = !ctx.canViewAll ? ctx.profile.office_id : null
-    if (!ctx.canViewAll && !scoped) {
+    const scoped = !ctx.canViewAll ? ctx.officeIds : null
+    if (scoped && scoped.length === 0) {
       return { error: "No office is assigned to your account.", data: null }
     }
 
@@ -136,14 +136,14 @@ export async function getDashboardStats(): Promise<
       .lte("quantity", lowThreshold)
 
     if (scoped) {
-      endorsementQuery = endorsementQuery.eq("office_id", scoped)
-      pendingQuery = pendingQuery.eq("office_id", scoped)
-      awaitingQuery = awaitingQuery.eq("office_id", scoped)
-      unconfirmedQuery = unconfirmedQuery.eq("request.office_id", scoped)
-      discrepancyQuery = discrepancyQuery.eq("request.office_id", scoped)
-      releasedQuery = releasedQuery.eq("office_id", scoped)
-      issuedQuery = issuedQuery.eq("office_id", scoped)
-      lowStockQuery = lowStockQuery.eq("office_id", scoped)
+      endorsementQuery = endorsementQuery.in("office_id", scoped)
+      pendingQuery = pendingQuery.in("office_id", scoped)
+      awaitingQuery = awaitingQuery.in("office_id", scoped)
+      unconfirmedQuery = unconfirmedQuery.in("request.office_id", scoped)
+      discrepancyQuery = discrepancyQuery.in("request.office_id", scoped)
+      releasedQuery = releasedQuery.in("office_id", scoped)
+      issuedQuery = issuedQuery.in("office_id", scoped)
+      lowStockQuery = lowStockQuery.in("office_id", scoped)
     }
 
     const [
@@ -182,7 +182,11 @@ export async function getDashboardStats(): Promise<
         releasedThisMonth: releasedMonth.count ?? 0,
         unitsIssuedThisMonth: unitsIssued,
         lowStockItems: lowStock.count ?? 0,
-        scopeLabel: scoped ? "Your office" : "All offices",
+        scopeLabel: !scoped
+          ? "All offices"
+          : scoped.length > 1
+          ? `Your ${scoped.length} offices`
+          : "Your office",
       },
     }
   } catch (e) {
@@ -193,7 +197,7 @@ export async function getDashboardStats(): Promise<
 export async function getPipelineCounts(): Promise<ActionResult<PipelineItem[]>> {
   try {
     const ctx = await requireSession()
-    const scoped = !ctx.canViewAll ? ctx.profile.office_id : null
+    const scoped = !ctx.canViewAll ? ctx.officeIds : null
 
     const results = await Promise.all(
       PIPELINE_STATUSES.map((status) => {
@@ -202,7 +206,7 @@ export async function getPipelineCounts(): Promise<ActionResult<PipelineItem[]>>
           .from("requests")
           .select("*", { count: "exact", head: true })
           .eq("status", status)
-        return scoped ? q.eq("office_id", scoped) : q
+        return scoped ? q.in("office_id", scoped) : q
       })
     )
 
@@ -239,10 +243,14 @@ export async function getRecentActivity(
       request?: { office_id?: string } | null
     })[]
 
-    // Supply officers only see activity on their own office's requests.
+    // Supply officers only see activity on their own offices' requests.
     if (!ctx.canViewAll) {
       rows = rows
-        .filter((r) => r.request?.office_id === ctx.profile.office_id)
+        .filter((r) =>
+          r.request?.office_id
+            ? ctx.officeIds.includes(r.request.office_id)
+            : false
+        )
         .slice(0, limit)
     }
 
@@ -268,8 +276,8 @@ export async function getTopIssuedItems(
       .gte("created_at", since)
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) return { error: null, data: [] }
-      query = query.eq("office_id", ctx.profile.office_id)
+      if (ctx.officeIds.length === 0) return { error: null, data: [] }
+      query = query.in("office_id", ctx.officeIds)
     }
 
     const { data, error } = await query
@@ -320,8 +328,8 @@ export async function getLowStock(limit = 10): Promise<ActionResult<LowStockEntr
       .limit(limit)
 
     if (!ctx.canViewAll) {
-      if (!ctx.profile.office_id) return { error: null, data: [] }
-      query = query.eq("office_id", ctx.profile.office_id)
+      if (ctx.officeIds.length === 0) return { error: null, data: [] }
+      query = query.in("office_id", ctx.officeIds)
     }
 
     const { data, error } = await query

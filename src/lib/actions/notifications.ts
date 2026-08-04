@@ -98,10 +98,10 @@ export async function getNotifications(): Promise<
     const canRelease = ctx.permissions.includes("request.release")
     const canAcknowledge = ctx.permissions.includes("request.acknowledge")
 
-    // Scoped users with no office have nothing they could act on — and
-    // `.eq("office_id", null)` would quietly match nothing anyway.
-    const scopedOffice = ctx.canViewAll ? null : ctx.profile.office_id
-    if (!ctx.canViewAll && !scopedOffice) {
+    // Scoped users with no office have nothing they could act on. A user may
+    // cover several offices, so this is a set and the queues use `.in()`.
+    const scopedOffices = ctx.canViewAll ? null : ctx.officeIds
+    if (scopedOffices && scopedOffices.length === 0) {
       return { error: null, data: EMPTY_FEED }
     }
 
@@ -114,7 +114,7 @@ export async function getNotifications(): Promise<
         .in("status", statuses)
         .order("updated_at", { ascending: true })
         .limit(LIST_LIMIT)
-      return scopedOffice ? q.eq("office_id", scopedOffice) : q
+      return scopedOffices ? q.in("office_id", scopedOffices) : q
     }
 
     /**
@@ -130,7 +130,7 @@ export async function getNotifications(): Promise<
         .eq("ack_status", ackStatus)
         .is("dispute_resolved_at", null)
 
-      if (scopedOffice) q = q.eq("request.office_id", scopedOffice)
+      if (scopedOffices) q = q.in("request.office_id", scopedOffices)
       // Mirrors the RPC's two-man rule: a release you recorded is not yours to
       // sign for, so it is not work and does not belong in your bell.
       if (excludeReleasedBy) q = q.neq("released_by", excludeReleasedBy)
@@ -184,10 +184,11 @@ export async function getNotifications(): Promise<
         query: mine(["approved", "partially_released"]),
       })
     }
-    // Scoped users only: `scopedOffice` is null for `request.view_all` holders,
-    // and the RPC refuses to let anyone sign for an office they are not in, so
-    // an unscoped bell entry would advertise work the server would then refuse.
-    if (canAcknowledge && scopedOffice) {
+    // Scoped users only: `scopedOffices` is null for `request.view_all`
+    // holders, and the RPC refuses to let anyone sign for an office they are
+    // not in, so an unscoped bell entry would advertise work the server would
+    // then refuse.
+    if (canAcknowledge && scopedOffices) {
       planned.push({
         kind: "confirm",
         query: releaseQueue("pending", ctx.userId),

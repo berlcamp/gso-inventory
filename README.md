@@ -120,6 +120,14 @@ Confirming receipt is scoped to the office the supplies went to, and never to th
 who recorded the release — one account cannot both hand goods over and sign that they
 arrived.
 
+**One person can cover several departments.** Under **Admin → Users**, pick a *primary
+office* (what shows on their profile, and what a new request defaults to) and tick any
+others under *Also acts for*. Their roles apply the same way in every office listed — a
+supply officer covering two departments files, and a department head covering two
+endorses, for both. Everything else follows: their requests list, dashboard, inventory,
+and notifications span all of their offices, and the new-request form gains an office
+picker as soon as there is more than one to choose from.
+
 Every office needs at least one supply officer before it can file requests. Add them under
 **Admin → Users** — pick the office and tick *Supply Officer*.
 
