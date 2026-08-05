@@ -427,18 +427,25 @@ export async function createRequest(
 }
 
 /**
- * Endorse a request so it reaches GSO.
+ * Endorse a request so it reaches GSO, at the quantities the head stands
+ * behind. `lines` maps request_item id → endorsed quantity.
  *
- * The department head is the requesting office's own second signature: they
- * send the slip on as filed, or reject it with a reason. Quantities are
- * deliberately untouched — trimming stays GSO's job at approval, so there is
- * exactly one place where approved quantities are decided.
+ * The head may **raise as well as cut** — they are the one person who knows
+ * what their office actually needs, and the supply officer filing on their
+ * behalf can get it wrong in either direction. The ceiling is what the office
+ * can still genuinely draw, the same `balance - committed` `createRequest`
+ * enforces, so an endorsement can never promise stock that is not there.
+ *
+ * That is the one place quantities move upward. Everything downstream only
+ * cuts: the checker within the endorsed figure, the head within the
+ * recommended one.
  *
  * No RPC: endorsing moves no stock, so there is no balance change to keep in
  * the same transaction as the status change.
  */
 export async function endorseRequest(
   requestId: string,
+  lines: { request_item_id: string; quantity_endorsed: number }[],
   remarks?: string
 ): Promise<ActionResult> {
   try {
@@ -447,7 +454,7 @@ export async function endorseRequest(
     const { data: request, error: readError } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
-      .select("id, status, office_id")
+      .select("id, status, office_id, fiscal_year")
       .eq("id", requestId)
       .maybeSingle()
 
@@ -466,6 +473,94 @@ export async function endorseRequest(
       }
     }
 
+    const { data: requestLines, error: linesError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_items")
+      .select("id, item_id, quantity_requested, item:items(name)")
+      .eq("request_id", requestId)
+
+    if (linesError) return { error: linesError.message, data: null }
+
+    const byLineId = new Map(
+      ((requestLines ?? []) as unknown as {
+        id: string
+        item_id: string
+        quantity_requested: number
+        item: { name: string } | null
+      }[]).map((l) => [l.id, l])
+    )
+
+    // Every line, every time — an omitted one would silently keep the filed
+    // quantity while the endorsement claims to cover the whole slip.
+    const submitted = new Set(lines.map((l) => l.request_item_id))
+    if (submitted.size !== byLineId.size) {
+      return {
+        error: "Endorse a quantity for every item on this request.",
+        data: null,
+      }
+    }
+
+    for (const line of lines) {
+      if (!byLineId.has(line.request_item_id)) {
+        return { error: "That item is not on this request.", data: null }
+      }
+      if (line.quantity_endorsed < 0) {
+        return { error: "Endorsed quantity cannot be negative.", data: null }
+      }
+    }
+
+    const endorsed = lines
+      .filter((l) => l.quantity_endorsed > 0)
+      .map((l) => ({
+        item_id: byLineId.get(l.request_item_id)?.item_id ?? "",
+        quantity: l.quantity_endorsed,
+      }))
+      .filter((l) => l.item_id)
+
+    // Zeroing every line endorses nothing at all. Whatever that is, it is not
+    // a slip GSO should be asked to fill — rejecting says so on the record.
+    if (endorsed.length === 0) {
+      return {
+        error:
+          "Endorse at least one item, or reject the request if none of it should go to GSO.",
+        data: null,
+      }
+    }
+
+    // The same check `createRequest` ran, re-run because the head may have
+    // raised a line and because the balance can have moved since filing.
+    const [availability, { data: settings }] = await Promise.all([
+      loadAvailability(
+        ctx,
+        request.office_id as string,
+        endorsed.map((l) => l.item_id),
+        request.fiscal_year as number,
+        requestId
+      ),
+      getSystemSettings(),
+    ])
+    const problem = checkAgainstAvailability(
+      endorsed,
+      availability,
+      request.fiscal_year as number,
+      settings.allow_over_release
+    )
+    if (problem) return { error: problem, data: null }
+
+    for (const line of lines) {
+      const { error } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("request_items")
+        .update({ quantity_endorsed: line.quantity_endorsed })
+        .eq("id", line.request_item_id)
+        .eq("request_id", requestId)
+
+      if (error) return { error: error.message, data: null }
+    }
+
+    // Lines first, then the transition — a failure between the two leaves the
+    // slip with the head, where they can simply endorse it again.
+    //
     // The status predicate makes this a no-op if a second head got there
     // first, rather than stamping a second endorsement over the first.
     const { error } = await ctx.supabase
@@ -503,10 +598,12 @@ export async function endorseRequest(
  * The GSO checker's pass over an endorsed request: what GSO can actually
  * grant, line by line, and then upward to the head.
  *
- * **Cutting only.** A recommendation above what the office asked for is
- * refused here and by a CHECK constraint on the column — the checker's job is
- * to bring a slip down to what GSO can meet, and a stage that could inflate a
- * request would need its own approval to be worth anything.
+ * **Cutting only.** A recommendation above the endorsed quantity is refused
+ * here and by a CHECK constraint on the column — the checker's job is to bring
+ * a slip down to what GSO can meet, and a stage that could inflate a request
+ * would need its own approval to be worth anything. The ceiling is the
+ * *endorsed* figure, not the filed one: raising a line is the department
+ * head's call, and it is already made by the time this runs.
  *
  * The quantities are checked against the same availability the approval will
  * check, excluding this request's own claim. Recommending numbers the head
@@ -549,7 +646,9 @@ export async function recommendRequest(
     const { data: requestLines, error: linesError } = await ctx.supabase
       .schema(SCHEMA)
       .from("request_items")
-      .select("id, item_id, quantity_requested, item:items(name)")
+      .select(
+        "id, item_id, quantity_requested, quantity_endorsed, item:items(name)"
+      )
       .eq("request_id", requestId)
 
     if (linesError) return { error: linesError.message, data: null }
@@ -559,6 +658,7 @@ export async function recommendRequest(
         id: string
         item_id: string
         quantity_requested: number
+        quantity_endorsed: number | null
         item: { name: string } | null
       }[]).map((l) => [l.id, l])
     )
@@ -582,11 +682,12 @@ export async function recommendRequest(
       if (line.quantity_recommended < 0) {
         return { error: "Recommended quantity cannot be negative.", data: null }
       }
-      if (line.quantity_recommended > Number(item.quantity_requested)) {
+      // Null on requests endorsed before migration 17 — there the filed figure
+      // is what the head signed off on.
+      const ceiling = Number(item.quantity_endorsed ?? item.quantity_requested)
+      if (line.quantity_recommended > ceiling) {
         return {
-          error: `${item.item?.name ?? "This item"}: you can only reduce a requested quantity — ${Number(
-            item.quantity_requested
-          ).toLocaleString()} was requested.`,
+          error: `${item.item?.name ?? "This item"}: you can only reduce an endorsed quantity — ${ceiling.toLocaleString()} was endorsed.`,
           data: null,
         }
       }

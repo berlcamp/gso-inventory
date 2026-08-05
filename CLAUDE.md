@@ -76,8 +76,10 @@ being touched. A boolean would have left `pending` meaning two things and every 
 having to remember a second predicate; miss one and un-endorsed requests leak to GSO,
 which is the exact bypass this stage exists to prevent.
 
-The head **endorses or rejects only — never adjusts quantities**. Trimming is GSO's job,
-and inside GSO it belongs to exactly one desk: the checker's.
+The head **endorses at quantities of their own** (migration 17) — the one stage that can
+raise a line as well as cut one. They know what the office actually needs and the supply
+officer filing on their behalf can be wrong in either direction; an increase is capped at
+`balance - committed`, so an endorsement can never promise stock that is not there.
 
 **`recommended` is the GSO checker's stage** (migration 16), added for the same reason and
 by the same shape. A **GSO Checker** goes down an endorsed slip line by line, cuts each
@@ -85,16 +87,22 @@ quantity to what GSO can actually grant, and recommends it; only then can the **
 approve. The head cannot approve out of `pending` at all — one predicate in
 `approveRequest`, which is what a status buys and a flag would not.
 
-Two ceilings carry the rule, and both are CHECK constraints as well as server checks:
-`quantity_recommended ≤ quantity_requested` (the checker **cuts, never adds** — a stage
-that could inflate a request would need approving itself) and
-`quantity_approved ≤ quantity_recommended` (the head may cut further, but granting above
-the recommendation would make the check advisory).
+**Four signatures, four columns**, and every stage after endorsement can only cut:
 
-`quantity_recommended` is its own column rather than an early write into
-`quantity_approved`: they are two different people's numbers, and a request showing an
-approved quantity before anyone approved it is a lie the request page would then have to
-keep telling. The detail table shows Req. / Rec. / Appr. side by side for that reason.
+| Column | Whose number | Ceiling |
+|---|---|---|
+| `quantity_requested` | the supply officer who filed | — |
+| `quantity_endorsed` | their department head | `balance - committed` (not a constraint — it depends on other requests) |
+| `quantity_recommended` | the GSO checker | `quantity_endorsed`, CHECK constraint |
+| `quantity_approved` | the GSO head | `quantity_recommended`, CHECK constraint |
+
+Each is its own column rather than an overwrite of the one before: they are different
+people's numbers, a request showing an approved quantity before anyone approved it is a
+lie the page would have to keep telling, and a raised line is only attributable to the
+head who raised it if the filed figure survives beside it. The detail table shows
+Req. / End. / Rec. / Appr. for that reason. A NULL reads as "this stage has not spoken
+yet" — every ceiling COALESCEs down the chain, which is what keeps requests filed before
+either migration working.
 
 `request.recommend` is held by `gso_checker` and admin, and deliberately by **not**
 `gso_custodian` — that role already holds `request.approve`, and both in one pair of hands
@@ -180,19 +188,24 @@ An office can only ever draw items **it holds an allocation for**, and only from
 **its own** `office_stocks` row — `release_request` takes the office id from the request
 row, never from caller input, so there is no path to another office's balance.
 
-The quantity limit is checked in four places, and they must agree:
+The quantity limit is checked in five places, and they must agree:
 
 | Where | Checks against |
 |---|---|
 | `createRequest` | `balance - committed` |
+| `endorseRequest` | `balance - committed`, excluding the request being endorsed |
 | `recommendRequest` | `balance - committed`, excluding the request being checked |
 | `approveRequest` | `balance - committed`, excluding the request being approved |
 | `release_request` (RPC) | raw `balance` |
 
+`endorseRequest` is the one that matters most: it is the only stage that can *raise* a
+quantity, so its check is the whole ceiling on an increase rather than a re-run of
+something already enforced. The balance can also have moved since filing.
+
 `recommendRequest` runs the check the approval will run rather than skipping it as a
 read-only stage: recommending a number the head then cannot approve moves the failure one
 desk further from the person who could still have fixed it. It is on top of the
-recommendation's own ceiling — a checker can never recommend more than was requested.
+recommendation's own ceiling — a checker can never recommend more than was endorsed.
 
 `committed` is what other **approved but not yet collected** requests have spoken for.
 Without subtracting it, two requests could each be approved for the whole balance and the
@@ -462,6 +475,7 @@ drops the badge the moment you endorse something and land back on the list.
 14. `..._release_receipt_confirmation.sql` — the `release_ack_status` enum, `request_releases`, `request_release_items`, `stock_movements.release_id`, and `acknowledge_release`; `release_request` is replaced to open a release header. Backfills pre-existing releases as `waived`
 15. `..._users_in_multiple_offices.sql` — `user_offices`, seeded from every profile's primary office. See **Office scope**
 16. `..._gso_checker_recommendation.sql` — the `recommended` status and action, `recommended_by`/`recommended_at`, `request_items.quantity_recommended` with the two ceilings as CHECK constraints, and the `gso_checker` role plus `request.recommend`. Requests already at `pending` are deliberately not backfilled — a recommendation nobody made is worse than a queue. Its closing `SELECT` reports how many slips are waiting to be checked against how many people can check them
+17. `..._endorsed_quantities.sql` — `request_items.quantity_endorsed`, and the checker's ceiling moves onto it (`COALESCE(quantity_endorsed, quantity_requested)`, so slips endorsed before this keep working). No backfill: NULL there means "endorsed as filed, before the head could say otherwise", which is the truth about those rows
 
 ### Types
 

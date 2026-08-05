@@ -122,6 +122,7 @@ export function RequestDetail({
                 <>
                   <EndorseDialog
                     request={request}
+                    availability={availability}
                     onDone={() => router.refresh()}
                     onError={setError}
                   />
@@ -287,8 +288,13 @@ export function RequestDetail({
                   <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Req.
                   </TableHead>
-                  {/* What the checker says GSO can grant, beside what the head
-                      actually granted — two people's numbers, two columns. */}
+                  {/* Four signatures, four numbers: filed, endorsed by the
+                      office's head, recommended by the GSO checker, approved by
+                      the GSO head. Keeping them apart is what makes a raised or
+                      trimmed line attributable to whoever moved it. */}
+                  <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    End.
+                  </TableHead>
                   <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Rec.
                   </TableHead>
@@ -317,6 +323,11 @@ export function RequestDetail({
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {Number(line.quantity_requested).toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {line.quantity_endorsed === null
+                        ? "—"
+                        : Number(line.quantity_endorsed).toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {line.quantity_recommended === null
@@ -363,27 +374,47 @@ export function RequestDetail({
 /* ── Endorse ───────────────────────────────────────────────────────────── */
 
 /**
- * The department head's sign-off. Read-only on the quantities by design: the
- * head endorses the slip as filed or rejects it, and GSO does any trimming at
- * approval, so there is one place where approved quantities are decided.
+ * The department head's sign-off, at the quantities they stand behind.
+ *
+ * The only stage that can raise a line: the head knows what their office needs
+ * and the supply officer can have got it wrong either way. The cap is what the
+ * office can still draw — anything above that is stock GSO does not have, so
+ * the input flags it and the action refuses it.
  */
 function EndorseDialog({
   request,
+  availability,
   onDone,
   onError,
 }: {
   request: SupplyRequestRow
+  availability: Record<string, ItemAvailability>
   onDone: () => void
   onError: (message: string) => void
 }) {
   const lines = request.request_items ?? []
   const [open, setOpen] = useState(false)
+  const [quantities, setQuantities] = useState<Record<string, number>>(() =>
+    Object.fromEntries(
+      lines.map((l) => [
+        l.id,
+        Number(l.quantity_endorsed ?? l.quantity_requested),
+      ])
+    )
+  )
   const [remarks, setRemarks] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   async function handleEndorse() {
     setSubmitting(true)
-    const result = await endorseRequest(request.id, remarks.trim() || undefined)
+    const result = await endorseRequest(
+      request.id,
+      lines.map((l) => ({
+        request_item_id: l.id,
+        quantity_endorsed: Number(quantities[l.id] ?? 0),
+      })),
+      remarks.trim() || undefined
+    )
     setSubmitting(false)
 
     if (result.error) {
@@ -401,32 +432,66 @@ function EndorseDialog({
         <Stamp className="h-3.5 w-3.5" />
         Endorse to GSO
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[520px]">
+      <DialogContent className="sm:max-w-[560px]">
         <DialogHeader>
           <DialogTitle>Endorse Request</DialogTitle>
           <DialogDescription>
-            Confirms this request on behalf of your office and sends it to GSO.
-            GSO decides the final quantities when it approves.
+            Set the quantities your office stands behind — raise or lower any
+            line, up to what the office has left. GSO checks these figures and
+            can only cut them from here.
           </DialogDescription>
         </DialogHeader>
 
         <div className="max-h-[45vh] space-y-3 overflow-y-auto py-4">
-          <div className="divide-y divide-border/60 rounded-lg border border-border/60">
-            {lines.map((line) => (
+          {lines.map((line) => {
+            const stock = availability[line.item_id]
+            const available = stock?.available ?? 0
+            const committed = stock?.committed ?? 0
+            const requested = Number(line.quantity_requested)
+            const value = Number(quantities[line.id] ?? 0)
+
+            return (
               <div
                 key={line.id}
-                className="flex items-center justify-between gap-3 px-3 py-2.5"
+                className="flex items-center gap-3 rounded-lg border border-border/60 p-3"
               >
-                <p className="min-w-0 truncate text-sm font-medium">
-                  {line.item?.name ?? "—"}
-                </p>
-                <p className="shrink-0 text-sm tabular-nums text-muted-foreground">
-                  {Number(line.quantity_requested).toLocaleString()}{" "}
-                  {line.item?.unit?.code}
-                </p>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {line.item?.name ?? "—"}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Filed {requested.toLocaleString()} {line.item?.unit?.code} ·{" "}
+                    {available.toLocaleString()} available
+                  </p>
+                  {committed > 0 && (
+                    <p className="mt-0.5 text-[11px] text-amber-700">
+                      {(stock?.balance ?? 0).toLocaleString()} in balance, but{" "}
+                      {committed.toLocaleString()} is already approved for
+                      release on other requests
+                    </p>
+                  )}
+                </div>
+                <div className="w-24 shrink-0">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={available}
+                    step="any"
+                    value={value}
+                    onChange={(e) =>
+                      setQuantities((prev) => ({
+                        ...prev,
+                        [line.id]: Number(e.target.value),
+                      }))
+                    }
+                    className={`h-8 text-right tabular-nums ${
+                      value > available ? "border-destructive" : ""
+                    }`}
+                  />
+                </div>
               </div>
-            ))}
-          </div>
+            )
+          })}
 
           <div className="space-y-1.5 pt-1">
             <Label
@@ -462,10 +527,12 @@ function EndorseDialog({
  * The GSO checker's pass: cut each line to what GSO can actually grant, then
  * send it up to the head.
  *
- * The inputs cap at the requested quantity — the checker reduces, never adds —
- * and flag anything above what the office has left, because a recommendation
- * the head cannot approve is a round trip nobody needs. The action enforces
- * both, and a CHECK constraint enforces the first whatever the client sends.
+ * The inputs cap at the **endorsed** quantity — the checker reduces, never
+ * adds, and the head of the requesting office already had their say on the
+ * figure — and flag anything above what the office has left, because a
+ * recommendation the GSO head cannot approve is a round trip nobody needs. The
+ * action enforces both, and a CHECK constraint enforces the first whatever the
+ * client sends.
  */
 function RecommendDialog({
   request,
@@ -484,7 +551,9 @@ function RecommendDialog({
     Object.fromEntries(
       lines.map((l) => [
         l.id,
-        Number(l.quantity_recommended ?? l.quantity_requested),
+        Number(
+          l.quantity_recommended ?? l.quantity_endorsed ?? l.quantity_requested
+        ),
       ])
     )
   )
@@ -523,8 +592,8 @@ function RecommendDialog({
           <DialogTitle>Recommend for Approval</DialogTitle>
           <DialogDescription>
             Cut each line to what GSO can grant. You cannot raise a quantity
-            above what the office asked for. The GSO head approves from these
-            figures.
+            above what the requesting office endorsed. The GSO head approves
+            from these figures.
           </DialogDescription>
         </DialogHeader>
 
@@ -533,9 +602,13 @@ function RecommendDialog({
             const stock = availability[line.item_id]
             const available = stock?.available ?? 0
             const committed = stock?.committed ?? 0
-            const requested = Number(line.quantity_requested)
+            // Null on a request endorsed before migration 17 — there the filed
+            // figure is what the head signed off on.
+            const endorsed = Number(
+              line.quantity_endorsed ?? line.quantity_requested
+            )
             const value = Number(quantities[line.id] ?? 0)
-            const invalid = value > requested || value > available
+            const invalid = value > endorsed || value > available
 
             return (
               <div
@@ -547,7 +620,7 @@ function RecommendDialog({
                     {line.item?.name ?? "—"}
                   </p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    Requested {requested.toLocaleString()}{" "}
+                    Endorsed {endorsed.toLocaleString()}{" "}
                     {line.item?.unit?.code} · {available.toLocaleString()}{" "}
                     available
                   </p>
@@ -563,7 +636,7 @@ function RecommendDialog({
                   <Input
                     type="number"
                     min={0}
-                    max={requested}
+                    max={endorsed}
                     step="any"
                     value={value}
                     onChange={(e) =>
@@ -682,7 +755,9 @@ function ApproveDialog({
             const available = stock?.available ?? 0
             const committed = stock?.committed ?? 0
             const recommended = Number(
-              line.quantity_recommended ?? line.quantity_requested
+              line.quantity_recommended ??
+                line.quantity_endorsed ??
+                line.quantity_requested
             )
             const ceiling = Math.min(recommended, available)
             const value = Number(quantities[line.id] ?? 0)

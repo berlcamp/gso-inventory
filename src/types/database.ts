@@ -189,8 +189,18 @@ export interface RequestItem {
   item_id: string
   quantity_requested: number
   /**
+   * What the requesting office's department head stands behind. NULL on a
+   * request filed before migration 17, and on one nobody has endorsed yet —
+   * read it as `quantity_endorsed ?? quantity_requested`.
+   *
+   * The head may raise as well as cut, capped at what the office can still
+   * draw. That ceiling lives in `endorseRequest`, not in a constraint: it
+   * depends on other requests, so no single row can check it.
+   */
+  quantity_endorsed: number | null
+  /**
    * What the GSO checker says GSO can grant. NULL until someone checks it.
-   * Never above `quantity_requested` — the checker cuts, never adds — and
+   * Never above the endorsed quantity — the checker cuts, never adds — and
    * `quantity_approved` can never exceed it. Both are CHECK constraints.
    */
   quantity_recommended: number | null
