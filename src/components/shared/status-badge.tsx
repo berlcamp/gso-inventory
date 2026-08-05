@@ -16,6 +16,11 @@ const statusConfig: Record<
     dot: "bg-yellow-500",
     className: "bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200",
   },
+  recommended: {
+    label: "For Approval",
+    dot: "bg-teal-500",
+    className: "bg-teal-50 text-teal-800 ring-1 ring-teal-200",
+  },
   approved: {
     label: "Approved",
     dot: "bg-blue-500",

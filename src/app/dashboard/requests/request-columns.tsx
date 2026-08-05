@@ -14,6 +14,7 @@ export { RECEIPT_FILTER_OPTIONS } from "@/lib/requests/receipt"
 export const REQUEST_STATUS_OPTIONS = [
   { label: "For Endorsement", value: "awaiting_endorsement" },
   { label: "For GSO Review", value: "pending" },
+  { label: "For Approval", value: "recommended" },
   { label: "Approved", value: "approved" },
   { label: "Partially Released", value: "partially_released" },
   { label: "Released", value: "released" },

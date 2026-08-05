@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/table"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
+  ClipboardCheck,
   ClipboardList,
   PackageCheck,
   Boxes,
@@ -47,11 +48,21 @@ const statCards = [
     key: "pendingRequests" as const,
     title: "For GSO Review",
     icon: ClipboardList,
-    description: "Endorsed, awaiting GSO",
+    description: "Endorsed, waiting on the checker",
     href: "/dashboard/requests?status=pending",
     accent: "border-amber-500",
     iconBg: "bg-amber-50 text-amber-600",
     valueCls: "text-amber-700",
+  },
+  {
+    key: "recommendedRequests" as const,
+    title: "For Approval",
+    icon: ClipboardCheck,
+    description: "Checked, waiting on the GSO head",
+    href: "/dashboard/requests?status=recommended",
+    accent: "border-teal-500",
+    iconBg: "bg-teal-50 text-teal-600",
+    valueCls: "text-teal-700",
   },
   {
     key: "awaitingRelease" as const,

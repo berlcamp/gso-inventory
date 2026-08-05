@@ -7,8 +7,10 @@ import type { ActionResult, RequestLogRow, RequestStatus } from "@/types/databas
 export interface DashboardStats {
   /** Filed, still with the requesting office's department head. */
   awaitingEndorsement: number
-  /** Endorsed and on GSO's desk. */
+  /** Endorsed and on the GSO checker's desk. */
   pendingRequests: number
+  /** Checked and recommended — waiting on the GSO head's approval. */
+  recommendedRequests: number
   awaitingRelease: number
   /** Handed over but not yet signed for by the office that received it. */
   awaitingConfirmation: number
@@ -46,6 +48,7 @@ export interface LowStockEntry {
 const PIPELINE_STATUSES: RequestStatus[] = [
   "awaiting_endorsement",
   "pending",
+  "recommended",
   "approved",
   "partially_released",
   "released",
@@ -70,8 +73,8 @@ export async function getDashboardStats(): Promise<
     const { data: settings } = await getSystemSettings()
     const lowThreshold = settings.low_stock_threshold
 
-    // `pending` now means "endorsed, on GSO's desk" — the stage before it has
-    // its own status, so this count needs no extra predicate to stay honest.
+    // Every stage before release has its own status, so each of these counts is
+    // one predicate and none of them can overlap.
     let endorsementQuery = ctx.supabase
       .schema(SCHEMA)
       .from("requests")
@@ -83,6 +86,12 @@ export async function getDashboardStats(): Promise<
       .from("requests")
       .select("*", { count: "exact", head: true })
       .eq("status", "pending")
+
+    let recommendedQuery = ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "recommended")
 
     let awaitingQuery = ctx.supabase
       .schema(SCHEMA)
@@ -138,6 +147,7 @@ export async function getDashboardStats(): Promise<
     if (scoped) {
       endorsementQuery = endorsementQuery.in("office_id", scoped)
       pendingQuery = pendingQuery.in("office_id", scoped)
+      recommendedQuery = recommendedQuery.in("office_id", scoped)
       awaitingQuery = awaitingQuery.in("office_id", scoped)
       unconfirmedQuery = unconfirmedQuery.in("request.office_id", scoped)
       discrepancyQuery = discrepancyQuery.in("request.office_id", scoped)
@@ -149,6 +159,7 @@ export async function getDashboardStats(): Promise<
     const [
       endorsement,
       pending,
+      recommended,
       awaiting,
       unconfirmed,
       discrepancies,
@@ -158,6 +169,7 @@ export async function getDashboardStats(): Promise<
     ] = await Promise.all([
       endorsementQuery,
       pendingQuery,
+      recommendedQuery,
       awaitingQuery,
       unconfirmedQuery,
       discrepancyQuery,
@@ -176,6 +188,7 @@ export async function getDashboardStats(): Promise<
       data: {
         awaitingEndorsement: endorsement.count ?? 0,
         pendingRequests: pending.count ?? 0,
+        recommendedRequests: recommended.count ?? 0,
         awaitingRelease: awaiting.count ?? 0,
         awaitingConfirmation: unconfirmed.count ?? 0,
         openDiscrepancies: discrepancies.count ?? 0,

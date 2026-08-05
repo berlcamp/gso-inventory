@@ -66,7 +66,7 @@ could reach it until migration 10.
 
 ### Request flow
 
-`awaiting_endorsement` → `pending` → `approved` → `released`
+`awaiting_endorsement` → `pending` → `recommended` → `approved` → `released`
 
 A supply officer files; the requesting office's **own department head** endorses it; only
 then does GSO see it. So `pending` means exactly "endorsed, on GSO's desk" and nothing
@@ -76,14 +76,39 @@ being touched. A boolean would have left `pending` meaning two things and every 
 having to remember a second predicate; miss one and un-endorsed requests leak to GSO,
 which is the exact bypass this stage exists to prevent.
 
-The head **endorses or rejects only — never adjusts quantities**. Trimming stays GSO's job
-at approval, so there is one place where approved quantities are decided.
+The head **endorses or rejects only — never adjusts quantities**. Trimming is GSO's job,
+and inside GSO it belongs to exactly one desk: the checker's.
+
+**`recommended` is the GSO checker's stage** (migration 16), added for the same reason and
+by the same shape. A **GSO Checker** goes down an endorsed slip line by line, cuts each
+quantity to what GSO can actually grant, and recommends it; only then can the **GSO Head**
+approve. The head cannot approve out of `pending` at all — one predicate in
+`approveRequest`, which is what a status buys and a flag would not.
+
+Two ceilings carry the rule, and both are CHECK constraints as well as server checks:
+`quantity_recommended ≤ quantity_requested` (the checker **cuts, never adds** — a stage
+that could inflate a request would need approving itself) and
+`quantity_approved ≤ quantity_recommended` (the head may cut further, but granting above
+the recommendation would make the check advisory).
+
+`quantity_recommended` is its own column rather than an early write into
+`quantity_approved`: they are two different people's numbers, and a request showing an
+approved quantity before anyone approved it is a lie the request page would then have to
+keep telling. The detail table shows Req. / Rec. / Appr. side by side for that reason.
+
+`request.recommend` is held by `gso_checker` and admin, and deliberately by **not**
+`gso_custodian` — that role already holds `request.approve`, and both in one pair of hands
+is the thing this stage exists to prevent. Admin holds both as the escape hatch, the same
+one that lets admin endorse when an office's head is away. **Nothing moves past `pending`
+until somebody holds the role**; migration 16's closing `SELECT` reports how many requests
+are waiting and how many people can move them.
 
 Side exits: `rejected`, `cancelled`. `partially_released` sits between approved and released
 when only some of the approved quantity has gone out. Rejection is terminal at either
 stage — there is no edit-and-resubmit flow, so a corrected slip is filed as a new request.
-A request is cancellable while `awaiting_endorsement` or `pending`, i.e. right up to GSO's
-approval.
+The head can reject at `pending` or `recommended`, so a junk slip is never stuck waiting to
+be checked first. A request is cancellable while `awaiting_endorsement`, `pending`, or
+`recommended` — i.e. right up to GSO's approval, since nothing is committed before it.
 
 **Filing requires the office to have a department head.** `createRequest` refuses when the
 requesting office has no active user holding the `department_head` role — the slip would
@@ -135,7 +160,7 @@ Resolution exists so the queues can empty: a dispute nobody can close would ligh
 forever and everyone would learn to ignore it.
 
 Rolled up per request by `rollUpReceipt` (worst-first: disputed → pending → confirmed →
-waived) for the list column, the dashboard tiles, and the stepper's fifth step.
+waived) for the list column, the dashboard tiles, and the stepper's last step.
 
 ### Postgres functions (all `SECURITY DEFINER`)
 
@@ -155,13 +180,19 @@ An office can only ever draw items **it holds an allocation for**, and only from
 **its own** `office_stocks` row — `release_request` takes the office id from the request
 row, never from caller input, so there is no path to another office's balance.
 
-The quantity limit is checked in three places, and they must agree:
+The quantity limit is checked in four places, and they must agree:
 
 | Where | Checks against |
 |---|---|
 | `createRequest` | `balance - committed` |
+| `recommendRequest` | `balance - committed`, excluding the request being checked |
 | `approveRequest` | `balance - committed`, excluding the request being approved |
 | `release_request` (RPC) | raw `balance` |
+
+`recommendRequest` runs the check the approval will run rather than skipping it as a
+read-only stage: recommending a number the head then cannot approve moves the failure one
+desk further from the person who could still have fixed it. It is on top of the
+recommendation's own ceiling — a checker can never recommend more than was requested.
 
 `committed` is what other **approved but not yet collected** requests have spoken for.
 Without subtracting it, two requests could each be approved for the whole balance and the
@@ -294,7 +325,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, endorsing, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
+| `requests.ts` | Filing, endorsing, recommending, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -325,11 +356,16 @@ would go back to paying for four auth round trips before fetching any real data.
 Authorization is enforced in server actions, not RLS (RLS gates access to authenticated
 users only). The key distinction is `request.view_all`:
 
-- Holders (admin, GSO head, GSO custodian) see and act on every office.
+- Holders (admin, GSO head, GSO custodian, GSO checker) see and act on every office.
 - Without it, a supply officer or department head is scoped to `profile.office_id` for requests, balances, ledger, and dashboard figures.
 
-Roles: `admin`, `gso_head`, `gso_custodian`, `supply_officer` (migration 2) and
-`department_head` (migration 7).
+Roles: `admin`, `gso_head`, `gso_custodian`, `supply_officer` (migration 2),
+`department_head` (migration 7), and `gso_checker` (migration 16).
+
+**The GSO checker** holds `request.recommend` plus `request.view`, `request.view_all`, and
+`inventory.view` — and deliberately **not** `request.approve`. The queue is GSO-wide, so
+the checker is unscoped like the rest of the GSO side; `inventory.view` is what they trim
+against.
 
 **Department heads** hold `request.endorse` plus `request.view` and `inventory.view` — and
 deliberately **not** `request.create`. Heads review what their supply officer files; they do
@@ -345,10 +381,13 @@ exempt from that scoping, so admin can always unblock a request when an office's
 unavailable.
 
 `rejectRequest` serves both stages and picks the rule from the request's current status:
-`awaiting_endorsement` needs `request.endorse` **and** the office match; `pending`/`approved`
-needs `request.approve`. Holding one permission never lets someone reject at the other's
-stage. The head's rejection stamps `endorsed_by`/`endorsed_at` (an endorsement decision),
-GSO's stamps `reviewed_by`/`reviewed_at`.
+`awaiting_endorsement` needs `request.endorse` **and** the office match;
+`pending`/`recommended`/`approved` needs `request.approve`. Holding one permission never
+lets someone reject at the other's stage. The head's rejection stamps
+`endorsed_by`/`endorsed_at` (an endorsement decision), GSO's stamps
+`reviewed_by`/`reviewed_at`. `request.recommend` carries no rejection of its own — the
+checker's answer to a line they cannot fill is to recommend zero, and the head can still
+reject the whole slip at `pending` without waiting for it to be checked.
 
 ### Notifications
 
@@ -366,7 +405,8 @@ bucket reuses the *same* predicate the matching action enforces:
 | Kind | Permission | Status | Scope |
 |---|---|---|---|
 | `endorse` | `request.endorse` | `awaiting_endorsement` | own offices unless `request.view_all` |
-| `review` | `request.approve` | `pending` | own offices unless `request.view_all` |
+| `check` | `request.recommend` | `pending` | own offices unless `request.view_all` |
+| `review` | `request.approve` | `recommended` | own offices unless `request.view_all` |
 | `dispute` | `request.release` | releases `disputed` and unresolved | own offices unless `request.view_all` |
 | `release` | `request.release` | `approved`, `partially_released` | own offices unless `request.view_all` |
 | `confirm` | `request.acknowledge` | releases `pending`, not released by me | own offices; scoped users only |
@@ -382,7 +422,9 @@ That reuse is load-bearing: a bell that drifted from its action would advertise 
 server then refuses, which is worse than no bell.
 
 **The buckets are disjoint by status so their exact counts can simply be summed.**
-`release` and `pickup` are the pair that would collide — both read
+`check` and `review` stay disjoint for free — `pending` is the checker's queue and
+`recommended` is the head's, and an admin who holds both permissions gets each request in
+exactly one of them. `release` and `pickup` are the pair that would collide — both read
 `approved | partially_released` — so `pickup` is skipped entirely for `request.release`
 holders, who get the more actionable verb. `buildFeed` still dedupes defensively and
 discounts only the overlap it can actually observe in the fetched rows, never guessing at
@@ -415,6 +457,11 @@ drops the badge the moment you endorse something and land back on the list.
 9. `..._seed_department_heads.sql` — template: fill in each office's Google email. Its closing `SELECT` lists offices that still have no head and therefore cannot file
 10. `..._opening_balance_and_ledger_issued.sql` — replaces `adjust_stock` so the `opening` movement type sets `opening_quantity`, and so the fiscal year comes from `system_settings` rather than the wall clock (it was the last place still reading the calendar year). Adds `office_stock_issued`. Backfills a baseline onto rows an adjustment opened at zero — skipping seeded rows, where `opening_quantity = 0` is a fact from the spreadsheet rather than a missing baseline. Idempotent; its closing `SELECT` lists allocations that still have no baseline
 11. `..._import_hris_department_users.sql` — pre-registers the department-side accounts by reading `hris.user_profiles` directly. The HRIS system shares this Supabase project, so the import is a cross-schema `INSERT … SELECT` rather than a transcribed email list; it maps `department_admin` → `supply_officer` and `department_head` → `department_head`, and leaves `office_id` NULL because the two systems' office codes do not line up one-for-one. An optional commented block at the bottom fills the offices in from the HRIS department code
+12. `..._remove_walk_in_releases.sql` — drops `create_walk_in_release` and `request.walk_in`. See **Walk-ins are gone**
+13. `..._receipt_confirmation_enum.sql` — the `received`/`disputed`/`resolved` actions, split out from 14, which writes those literals inside a function body — for the same reason 8 was split from 7
+14. `..._release_receipt_confirmation.sql` — the `release_ack_status` enum, `request_releases`, `request_release_items`, `stock_movements.release_id`, and `acknowledge_release`; `release_request` is replaced to open a release header. Backfills pre-existing releases as `waived`
+15. `..._users_in_multiple_offices.sql` — `user_offices`, seeded from every profile's primary office. See **Office scope**
+16. `..._gso_checker_recommendation.sql` — the `recommended` status and action, `recommended_by`/`recommended_at`, `request_items.quantity_recommended` with the two ceilings as CHECK constraints, and the `gso_checker` role plus `request.recommend`. Requests already at `pending` are deliberately not backfilled — a recommendation nobody made is worse than a queue. Its closing `SELECT` reports how many slips are waiting to be checked against how many people can check them
 
 ### Types
 

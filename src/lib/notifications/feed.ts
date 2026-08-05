@@ -19,7 +19,9 @@ import type { RequestStatus } from "@/types/database"
 export type NotificationKind =
   /** Filed for your office, waiting on you as its department head. */
   | "endorse"
-  /** Endorsed and sitting on GSO's desk. */
+  /** Endorsed — quantities still to be checked and recommended. */
+  | "check"
+  /** Recommended and sitting on the GSO head's desk. */
   | "review"
   /** Released to an office that says the quantities were wrong — GSO's to settle. */
   | "dispute"
@@ -44,6 +46,7 @@ export type NotificationKind =
  */
 export const ACTIONABLE_KINDS = [
   "endorse",
+  "check",
   "review",
   "dispute",
   "release",
@@ -97,7 +100,8 @@ export interface NotificationFeed {
 
 const KIND_HEADLINE: Record<Exclude<NotificationKind, "outcome">, string> = {
   endorse: "Needs your endorsement",
-  review: "Waiting for GSO review",
+  check: "Needs checking before approval",
+  review: "Recommended — waiting on your approval",
   dispute: "Delivery discrepancy reported",
   release: "Ready to release",
   confirm: "Confirm what your office received",
@@ -111,7 +115,8 @@ const OUTCOME_HEADLINE: Partial<Record<RequestStatus, string>> = {
 
 export const SECTION_LABEL: Record<NotificationKind, string> = {
   endorse: "For your endorsement",
-  review: "For GSO review",
+  check: "For checking",
+  review: "For approval",
   dispute: "Reported discrepancies",
   release: "For release",
   confirm: "For receipt confirmation",

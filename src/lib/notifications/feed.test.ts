@@ -41,16 +41,17 @@ describe("buildFeed", () => {
     })
   })
 
-  it("orders actionable kinds endorse → review → release → pickup", () => {
+  it("orders actionable kinds endorse → check → review → release → pickup", () => {
     const feed = buildFeed([
-      source("pickup", [row({ id: "d", status: "approved" })]),
-      source("release", [row({ id: "c", status: "approved" })]),
+      source("pickup", [row({ id: "e", status: "approved" })]),
+      source("release", [row({ id: "d", status: "approved" })]),
       source("endorse", [row({ id: "a", status: "awaiting_endorsement" })]),
-      source("review", [row({ id: "b", status: "pending" })]),
+      source("review", [row({ id: "c", status: "recommended" })]),
+      source("check", [row({ id: "b", status: "pending" })]),
     ])
 
-    expect(feed.actionable.map((i) => i.id)).toEqual(["a", "b", "c", "d"])
-    expect(feed.count).toBe(4)
+    expect(feed.actionable.map((i) => i.id)).toEqual(["a", "b", "c", "d", "e"])
+    expect(feed.count).toBe(5)
     expect(feed.truncated).toBe(false)
   })
 

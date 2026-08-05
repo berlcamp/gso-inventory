@@ -12,19 +12,24 @@ import type { RequestStatus } from "@/types/database"
 const FLOW = [
   { key: "filed", label: "Filed" },
   { key: "endorsed", label: "Endorsed" },
+  { key: "checked", label: "Checked" },
   { key: "approved", label: "Approved" },
   { key: "released", label: "Released" },
   { key: "received", label: "Received" },
 ] as const
 
+/** The last step's index — "Received", the one that is not a status. */
+const RECEIPT_STEP = FLOW.length - 1
+
 const STATUS_INDEX: Partial<Record<RequestStatus, number>> = {
   awaiting_endorsement: 0,
   pending: 1,
-  approved: 2,
+  recommended: 2,
+  approved: 3,
   // Sits between approved and released, so it shows on the "Approved" step
   // rather than as one of its own.
-  partially_released: 2,
-  released: 3,
+  partially_released: 3,
+  released: 4,
 }
 
 /**
@@ -64,12 +69,16 @@ export function RequestStepper({
   // Once everything is out the door the open question is the receipt, so the
   // cursor moves to the last step and stays there until the office that got the
   // goods says they arrived.
-  const currentIndex = isReleased ? 4 : statusIndex
+  const currentIndex = isReleased ? RECEIPT_STEP : statusIndex
 
   return (
-    <div className="flex items-center">
+    // Six steps of nowrap labels outgrow a phone, and a flex item will not
+    // shrink below its content — so the row scrolls itself rather than dragging
+    // the whole page sideways. Where there is room, the connectors still
+    // stretch and nothing about the layout changes.
+    <div className="flex items-center overflow-x-auto">
       {FLOW.map((step, index) => {
-        const isReceiptStep = index === 4
+        const isReceiptStep = index === RECEIPT_STEP
         const disputed = isReceiptStep && receipt === "disputed"
         // A release nobody could ever sign for is not progress, but it is also
         // not work anyone can do — grey, with the reason spelled out.

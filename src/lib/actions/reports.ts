@@ -196,6 +196,7 @@ export async function getRequestStatusCounts(
   const empty: Record<RequestStatus, number> = {
     awaiting_endorsement: 0,
     pending: 0,
+    recommended: 0,
     approved: 0,
     partially_released: 0,
     released: 0,

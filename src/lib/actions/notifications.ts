@@ -77,8 +77,9 @@ function fromRelease(row: ReleaseNotificationRow): NotificationRequestRow | null
  * finished slips.
  *
  * Each bucket reuses the *same* predicate the corresponding action enforces —
- * `endorseRequest`'s office match, `approveRequest`'s `pending`, the release
- * dialog's `approved | partially_released`. That is not a coincidence to be
+ * `endorseRequest`'s office match, `recommendRequest`'s `pending`,
+ * `approveRequest`'s `recommended`, the release dialog's
+ * `approved | partially_released`. That is not a coincidence to be
  * maintained by hand: if the bell drifted from the action it would advertise
  * work the server then refuses, which is worse than no bell at all.
  *
@@ -94,6 +95,7 @@ export async function getNotifications(): Promise<
     const ctx = await requireSession()
 
     const canEndorse = ctx.permissions.includes("request.endorse")
+    const canRecommend = ctx.permissions.includes("request.recommend")
     const canApprove = ctx.permissions.includes("request.approve")
     const canRelease = ctx.permissions.includes("request.release")
     const canAcknowledge = ctx.permissions.includes("request.acknowledge")
@@ -163,8 +165,13 @@ export async function getNotifications(): Promise<
     if (canEndorse) {
       planned.push({ kind: "endorse", query: queue(["awaiting_endorsement"]) })
     }
+    // Still disjoint by status, so the counts stay summable: `pending` is the
+    // checker's queue and `recommended` is the head's, and no request is both.
+    if (canRecommend) {
+      planned.push({ kind: "check", query: queue(["pending"]) })
+    }
     if (canApprove) {
-      planned.push({ kind: "review", query: queue(["pending"]) })
+      planned.push({ kind: "review", query: queue(["recommended"]) })
     }
     if (canRelease) {
       planned.push({

@@ -34,6 +34,7 @@ const REQUEST_SELECT = `
   office:offices!office_id(id, name, code),
   requester:user_profiles!requested_by(id, full_name, email),
   endorser:user_profiles!endorsed_by(id, full_name),
+  recommender:user_profiles!recommended_by(id, full_name),
   reviewer:user_profiles!reviewed_by(id, full_name),
   releaser:user_profiles!released_by(id, full_name),
   request_releases(id, ack_status)
@@ -44,6 +45,7 @@ const REQUEST_DETAIL_SELECT = `
   office:offices!office_id(id, name, code),
   requester:user_profiles!requested_by(id, full_name, email),
   endorser:user_profiles!endorsed_by(id, full_name),
+  recommender:user_profiles!recommended_by(id, full_name),
   reviewer:user_profiles!reviewed_by(id, full_name),
   releaser:user_profiles!released_by(id, full_name),
   request_items(
@@ -498,11 +500,183 @@ export async function endorseRequest(
 }
 
 /**
- * Approve a pending request. `approvals` maps request_item id → approved
- * quantity, letting GSO trim what the office asked for.
+ * The GSO checker's pass over an endorsed request: what GSO can actually
+ * grant, line by line, and then upward to the head.
  *
- * `pending` means endorsed by the department head, so this needs no extra
- * check — a request that has not cleared the office is not in this status.
+ * **Cutting only.** A recommendation above what the office asked for is
+ * refused here and by a CHECK constraint on the column — the checker's job is
+ * to bring a slip down to what GSO can meet, and a stage that could inflate a
+ * request would need its own approval to be worth anything.
+ *
+ * The quantities are checked against the same availability the approval will
+ * check, excluding this request's own claim. Recommending numbers the head
+ * cannot then approve would move the failure one desk further from the person
+ * who can still fix it.
+ *
+ * No RPC: recommending moves no stock, so there is no balance change to keep
+ * in the same transaction — same reasoning as `endorseRequest`.
+ */
+export async function recommendRequest(
+  requestId: string,
+  lines: { request_item_id: string; quantity_recommended: number }[],
+  remarks?: string
+): Promise<ActionResult> {
+  try {
+    const ctx = await requirePermission("request.recommend")
+
+    const { data: request, error: readError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("id, status, office_id, fiscal_year")
+      .eq("id", requestId)
+      .maybeSingle()
+
+    if (readError) return { error: readError.message, data: null }
+    if (!request) return { error: "Request not found.", data: null }
+    if (request.status !== "pending") {
+      return {
+        error:
+          request.status === "awaiting_endorsement"
+            ? "This request is still waiting for its department head's endorsement."
+            : "Only requests on GSO's review desk can be recommended.",
+        data: null,
+      }
+    }
+
+    // The error matters here: an empty read would otherwise be indistinguishable
+    // from a request with no lines, and the "recommend every item" refusal below
+    // would blame the checker for a failed query.
+    const { data: requestLines, error: linesError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_items")
+      .select("id, item_id, quantity_requested, item:items(name)")
+      .eq("request_id", requestId)
+
+    if (linesError) return { error: linesError.message, data: null }
+
+    const byLineId = new Map(
+      ((requestLines ?? []) as unknown as {
+        id: string
+        item_id: string
+        quantity_requested: number
+        item: { name: string } | null
+      }[]).map((l) => [l.id, l])
+    )
+
+    // Every line, every time. Letting an omitted line stand for "grant it in
+    // full" would make a slip the checker never finished look like one they
+    // approved of.
+    const submitted = new Set(lines.map((l) => l.request_item_id))
+    if (submitted.size !== byLineId.size) {
+      return {
+        error: "Recommend a quantity for every item on this request.",
+        data: null,
+      }
+    }
+
+    for (const line of lines) {
+      const item = byLineId.get(line.request_item_id)
+      if (!item) {
+        return { error: "That item is not on this request.", data: null }
+      }
+      if (line.quantity_recommended < 0) {
+        return { error: "Recommended quantity cannot be negative.", data: null }
+      }
+      if (line.quantity_recommended > Number(item.quantity_requested)) {
+        return {
+          error: `${item.item?.name ?? "This item"}: you can only reduce a requested quantity — ${Number(
+            item.quantity_requested
+          ).toLocaleString()} was requested.`,
+          data: null,
+        }
+      }
+    }
+
+    const claimed = lines
+      .filter((l) => l.quantity_recommended > 0)
+      .map((l) => ({
+        item_id: byLineId.get(l.request_item_id)?.item_id ?? "",
+        quantity: l.quantity_recommended,
+      }))
+      .filter((l) => l.item_id)
+
+    const [availability, { data: settings }] = await Promise.all([
+      loadAvailability(
+        ctx,
+        request.office_id as string,
+        claimed.map((l) => l.item_id),
+        request.fiscal_year as number,
+        requestId
+      ),
+      getSystemSettings(),
+    ])
+    const problem = checkAgainstAvailability(
+      claimed,
+      availability,
+      request.fiscal_year as number,
+      settings.allow_over_release
+    )
+    if (problem) return { error: problem, data: null }
+
+    for (const line of lines) {
+      const { error } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("request_items")
+        .update({ quantity_recommended: line.quantity_recommended })
+        .eq("id", line.request_item_id)
+        .eq("request_id", requestId)
+
+      if (error) return { error: error.message, data: null }
+    }
+
+    // Lines first, then the transition: a failure between the two leaves the
+    // request on the checker's desk with numbers they can simply write again,
+    // which is the harmless way round. The status predicate keeps the
+    // transition itself single-authored if two checkers open the same slip.
+    const { error: updateError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .update({
+        status: "recommended",
+        recommended_by: ctx.userId,
+        recommended_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", requestId)
+      .eq("status", "pending")
+
+    if (updateError) return { error: updateError.message, data: null }
+
+    await ctx.supabase.schema(SCHEMA).from("request_logs").insert({
+      request_id: requestId,
+      stage: "recommended",
+      action: "recommended",
+      actor_id: ctx.userId,
+      remarks: remarks?.trim() || null,
+    })
+
+    revalidatePath(`/dashboard/requests/${requestId}`)
+    revalidatePath("/dashboard/requests")
+    revalidatePath("/dashboard")
+    return { error: null, data: null }
+  } catch (e) {
+    return { error: toError(e), data: null }
+  }
+}
+
+/**
+ * Approve a recommended request. `approvals` maps request_item id → approved
+ * quantity, letting the head cut further than the checker did.
+ *
+ * **Only from `recommended`.** The head cannot approve a slip nobody has
+ * checked: `pending` carries no recommended quantities, so there is nothing
+ * for an approval to be an approval *of*. That gate is the whole reason the
+ * status exists — and the reason it is a status rather than a flag is that
+ * this single predicate is all it takes to enforce.
+ *
+ * The ceiling is the recommendation, not the request. Granting more than was
+ * recommended would make the check advisory, and a CHECK constraint on the
+ * column refuses it too.
  */
 export async function approveRequest(
   requestId: string,
@@ -521,12 +695,14 @@ export async function approveRequest(
 
     if (readError) return { error: readError.message, data: null }
     if (!request) return { error: "Request not found.", data: null }
-    if (request.status !== "pending") {
+    if (request.status !== "recommended") {
       return {
         error:
           request.status === "awaiting_endorsement"
             ? "This request is still waiting for its department head's endorsement."
-            : "Only pending requests can be approved.",
+            : request.status === "pending"
+            ? "This request has not been checked yet. A GSO checker sets the quantities and recommends it before it can be approved."
+            : "Only recommended requests can be approved.",
         data: null,
       }
     }
@@ -539,17 +715,57 @@ export async function approveRequest(
 
     // Approving is a promise the counter has to keep, so check the quantities
     // against what is left after other approved-but-uncollected requests.
-    const { data: requestLines } = await ctx.supabase
+    //
+    // These rows carry the recommendation, i.e. the ceiling — so a failed read
+    // has to abort rather than fall through to an unchecked approval.
+    const { data: requestLines, error: linesError } = await ctx.supabase
       .schema(SCHEMA)
       .from("request_items")
-      .select("id, item_id")
+      .select(
+        "id, item_id, quantity_requested, quantity_recommended, item:items(name)"
+      )
       .eq("request_id", requestId)
 
+    if (linesError) return { error: linesError.message, data: null }
+
+    const byLineId = new Map(
+      ((requestLines ?? []) as unknown as {
+        id: string
+        item_id: string
+        quantity_requested: number
+        quantity_recommended: number | null
+        item: { name: string } | null
+      }[]).map((l) => [l.id, l])
+    )
+
+    for (const line of approvals) {
+      const item = byLineId.get(line.request_item_id)
+      if (!item) {
+        return { error: "That item is not on this request.", data: null }
+      }
+      // A null recommendation on a recommended request means the checker's
+      // write was interrupted; falling back to the requested quantity would
+      // quietly hand back the cut they were in the middle of making.
+      const ceiling = item.quantity_recommended
+      if (ceiling === null) {
+        return {
+          error:
+            "This request is missing its recommended quantities. Ask the GSO checker to recommend it again.",
+          data: null,
+        }
+      }
+      if (line.quantity_approved > Number(ceiling)) {
+        return {
+          error: `${item.item?.name ?? "This item"}: ${Number(
+            ceiling
+          ).toLocaleString()} was recommended, so no more than that can be approved.`,
+          data: null,
+        }
+      }
+    }
+
     const itemByLineId = new Map(
-      ((requestLines ?? []) as { id: string; item_id: string }[]).map((l) => [
-        l.id,
-        l.item_id,
-      ])
+      [...byLineId.values()].map((l) => [l.id, l.item_id])
     )
     const approvedLines = approvals
       .filter((a) => a.quantity_approved > 0)
@@ -659,7 +875,7 @@ export async function rejectRequest(
           data: null,
         }
       }
-    } else if (["pending", "approved"].includes(request.status)) {
+    } else if (["pending", "recommended", "approved"].includes(request.status)) {
       if (!ctx.permissions.includes("request.approve")) {
         return {
           error: "You do not have permission to reject this request.",
@@ -734,8 +950,13 @@ export async function cancelRequest(
 
     if (!request) return { error: "Request not found.", data: null }
     // Withdrawable right up to approval — including while it sits with the
-    // department head, which is where a slip filed in error is usually caught.
-    if (!["awaiting_endorsement", "pending"].includes(request.status)) {
+    // department head, which is where a slip filed in error is usually caught,
+    // and while GSO is checking it. Nothing is committed until approval.
+    if (
+      !["awaiting_endorsement", "pending", "recommended"].includes(
+        request.status
+      )
+    ) {
       return {
         error: "Only requests that have not been approved can be cancelled.",
         data: null,

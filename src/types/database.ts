@@ -12,8 +12,10 @@ export const SCHEMA = "gso_inventory" as const
 export type RequestStatus =
   /** Filed, waiting on the requesting office's own department head. */
   | "awaiting_endorsement"
-  /** Endorsed by the department head — now on GSO's desk. */
+  /** Endorsed by the department head — now on the GSO checker's desk. */
   | "pending"
+  /** Checked and cut to what GSO can grant — now on the GSO head's desk. */
+  | "recommended"
   | "approved"
   | "partially_released"
   | "released"
@@ -47,6 +49,8 @@ export type MovementType =
 export type RequestAction =
   | "submitted"
   | "endorsed"
+  /** The GSO checker set the quantities GSO can grant and passed it upward. */
+  | "recommended"
   | "approved"
   | "rejected"
   | "released"
@@ -167,6 +171,9 @@ export interface SupplyRequest {
   /** The department head's sign-off — distinct from GSO's `reviewed_by`. */
   endorsed_by: string | null
   endorsed_at: string | null
+  /** The GSO checker's sign-off on the quantities, before the head approves. */
+  recommended_by: string | null
+  recommended_at: string | null
   reviewed_by: string | null
   reviewed_at: string | null
   released_by: string | null
@@ -181,6 +188,12 @@ export interface RequestItem {
   request_id: string
   item_id: string
   quantity_requested: number
+  /**
+   * What the GSO checker says GSO can grant. NULL until someone checks it.
+   * Never above `quantity_requested` — the checker cuts, never adds — and
+   * `quantity_approved` can never exceed it. Both are CHECK constraints.
+   */
+  quantity_recommended: number | null
   quantity_approved: number | null
   quantity_released: number
   remarks: string | null
@@ -299,6 +312,7 @@ export type SupplyRequestRow = SupplyRequest & {
   office: Pick<Office, "id" | "name" | "code"> | null
   requester: Pick<UserProfile, "id" | "full_name" | "email"> | null
   endorser: Pick<UserProfile, "id" | "full_name"> | null
+  recommender: Pick<UserProfile, "id" | "full_name"> | null
   reviewer: Pick<UserProfile, "id" | "full_name"> | null
   releaser: Pick<UserProfile, "id" | "full_name"> | null
   request_items?: RequestItemRow[]
