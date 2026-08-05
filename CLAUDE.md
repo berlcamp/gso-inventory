@@ -265,6 +265,20 @@ passing NULL would return every office in the city. The new-request form shows a
 picker as soon as someone covers more than one, and the offices page lists a person under
 every office they cover, not just their primary.
 
+**Every `user_profiles` ⇄ `offices` embed must name its foreign key.** PostgREST reads
+`user_offices` as a junction table — two foreign keys, and a primary key made of exactly
+those two columns — and therefore publishes a **many-to-many** route between the two
+tables *in addition to* the direct `user_profiles.office_id` column. An unqualified
+`office:offices(...)` is then ambiguous and the whole query fails with `Could not embed
+because more than one relationship was found`; write `office:offices!office_id(...)`.
+
+This is the trap in the change, because the failure lands nowhere near the cause. Every
+call site already named its key by convention except the one in `requireSession`, so
+adding the table broke **session resolution itself** — every page, for every user, with
+an error mentioning only PostgREST. Embeds where `user_offices` is the *base* table
+(`from("user_offices").select("office:offices…")`) have one candidate and were never
+ambiguous; the hint is written there anyway to match the convention.
+
 ### Supabase Client Files
 
 | File | Usage |

@@ -135,6 +135,15 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
   // Profile, roles, and office memberships are independent — one round trip,
   // not three. The roles query walks user_roles → roles → role_permissions →
   // permissions in a single PostgREST embed instead of a two-step fetch.
+  //
+  // `offices!office_id` names the foreign key on purpose. `user_offices` is a
+  // junction table by PostgREST's reckoning — two foreign keys, and a primary
+  // key made of exactly those two columns — so it exposes a second, many-to-many
+  // route from `user_profiles` to `offices` alongside the direct `office_id`
+  // column. Without the hint the embed is ambiguous and the query fails
+  // outright with "more than one relationship was found", taking the whole
+  // session down with it. Every other embed in the codebase already names its
+  // key; this was the one that did not.
   const [
     { data: profile, error: profileError },
     { data: userRoles },
@@ -144,7 +153,7 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
         .schema(SCHEMA)
         .from("user_profiles")
         .select(
-          "id, full_name, email, position, avatar_url, office_id, is_active, office:offices(id, name, code, is_gso)"
+          "id, full_name, email, position, avatar_url, office_id, is_active, office:offices!office_id(id, name, code, is_gso)"
         )
         .eq("id", user.id)
         .maybeSingle(),
@@ -156,7 +165,7 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
       supabase
         .schema(SCHEMA)
         .from("user_offices")
-        .select("office:offices(id, name, code, is_gso)")
+        .select("office:offices!office_id(id, name, code, is_gso)")
         .eq("user_id", user.id),
     ])
 
