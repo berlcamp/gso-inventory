@@ -477,6 +477,30 @@ already and are not affected by the above.
    this automatically. `SheetContent` is `flex flex-col` and is only used by the mobile
    sidebar, so it was left alone.
 
+5. `DialogContent` also gained `max-h-[calc(100dvh-2rem)] overflow-y-auto` — the vertical
+   counterpart, and the one that actually strands a user. The popup is `fixed` and centred
+   with `-translate-y-1/2`, so a dialog taller than the viewport grows past **both** edges
+   at once, and a `fixed` element cannot be scrolled into view: the title and the top
+   fields are simply unreachable, and the page behind it does not scroll either. The
+   2rem leaves the same 1rem of breathing room top and bottom that
+   `max-w-[calc(100%-2rem)]` leaves at the sides, and `dvh` keeps the footer clear of
+   collapsing mobile browser chrome.
+
+   The cap makes every dialog scroll its whole card, which is the right fallback but not
+   the right default for a long *form* — the submit button ends up below the fold. The
+   Add/Edit User dialog (the only one that reliably outgrows a laptop) therefore overrides
+   `grid` with `flex flex-col` for itself and gives the fields `min-h-0 flex-1
+   overflow-y-auto` between a pinned header and footer. Each `min-h-0` undoes a flex
+   item's `min-height: auto`, which otherwise refuses to shrink below its content and puts
+   the overflow straight back. Measured at 1280×700: the card sits exactly 16px off each
+   edge, the fields scroll 559px, and Save never leaves the screen. Short dialogs are
+   untouched — still centred, still not scrolling.
+
+   Note `overflow-y: auto` forces `overflow-x` to compute to `auto` as well, which puts
+   `DialogFooter`'s full-bleed `-mx-5` at risk of a horizontal scrollbar. It spans exactly
+   the padding box, which is already inside the scrollable area, so it does not — verified,
+   not assumed.
+
 ### Route Structure
 
 All authenticated routes live under `/dashboard`. The dashboard layout is a **Server

@@ -363,8 +363,21 @@ function UserDialog({
           </>
         )}
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[460px]">
-        <form onSubmit={handleSubmit}>
+      {/* The longest form in the app — email, name, position, primary office,
+          the other-offices checklist, and every role. It is the one dialog
+          that reliably outgrows a laptop viewport, so rather than scroll the
+          whole card (the primitive's fallback) it scrolls its fields between
+          a pinned header and footer: the title stays legible and Save stays
+          clickable without paging to the bottom of the roles list first.
+
+          `flex flex-col` replaces the primitive's `grid` for this dialog
+          only — tailwind-merge keeps the last display utility — because the
+          fields need `flex-1` to claim exactly the height left over, which
+          an auto-sized grid row will not give them. Every `min-h-0` undoes a
+          flex item's `min-height: auto`, which would otherwise refuse to
+          shrink below the content and put the overflow back. */}
+      <DialogContent className="flex flex-col sm:max-w-[460px]">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <DialogHeader>
             <DialogTitle>{isEdit ? "Edit User" : "Add User"}</DialogTitle>
             <DialogDescription>
@@ -374,7 +387,7 @@ function UserDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-5">
             {error && (
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />

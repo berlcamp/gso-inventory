@@ -60,7 +60,17 @@ function DialogContent({
           // the dialog's own max-width and spilled every field out the right
           // edge, while the `truncate` that should have caught it never
           // engaged — there was always "enough" room once the parent grew.
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-5 text-sm text-popover-foreground shadow-xl ring-1 ring-foreground/10 duration-150 outline-none *:min-w-0 sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          //
+          // `max-h-[calc(100dvh-2rem)] overflow-y-auto` is the vertical
+          // counterpart, and it is not optional: the popup is `fixed` and
+          // centred with `-translate-y-1/2`, so a dialog taller than the
+          // viewport grows past *both* edges at once — and a fixed element
+          // cannot be scrolled into view, so the top of it, title included,
+          // is simply unreachable. The 2rem leaves the same 1rem breathing
+          // room top and bottom that `max-w-[calc(100%-2rem)]` leaves at the
+          // sides. `dvh` rather than `vh` so mobile browser chrome collapsing
+          // does not put the footer under the address bar.
+          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl bg-popover p-5 text-sm text-popover-foreground shadow-xl ring-1 ring-foreground/10 duration-150 outline-none *:min-w-0 sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
