@@ -208,6 +208,30 @@ OAuth callback at `/auth/callback/route.ts`:
 3. On first login of a pre-registered user, migrates the placeholder profile to the real auth UID using the admin client. **Both `user_roles` and `user_offices` are read before the delete and re-inserted against the new id** — they cascade off the profile row, so a user assigned to several offices would otherwise lose all but their primary the first time they signed in, with the admin screen still showing the assignment.
 4. Redirects unauthorized or deactivated users to `/auth?error=...` and signs them out.
 
+**Two components decide who is signed in, and they must not disagree.** The proxy knows
+only `auth.users`; the dashboard layout additionally requires a usable `user_profiles`
+row. A valid Google session with no usable profile therefore satisfies one and fails the
+other — and with the proxy bouncing every authenticated request off `/auth`, the two sent
+the user back and forth until the browser gave up with `ERR_TOO_MANY_REDIRECTS`, in place
+of the page that would have said why. Three rules keep that closed:
+
+- **The proxy bounces only the bare login page, and only without `?error=`.** Sub-routes
+  are exempt because `/auth/callback` *establishes* the session and `/auth/signout`
+  *clears* it — bouncing them would discard the OAuth code and strand the cookie.
+- **Denying access must clear the cookie on the response being returned.**
+  `supabase.auth.signOut()` writes its expiry through `next/headers`, a different channel
+  from the `NextResponse` a route handler constructs, so a denied account could otherwise
+  keep a live session. `clearAuthCookies` (`src/lib/auth/cookies.ts`) does it explicitly;
+  the callback's `deny()` and `/auth/signout` both go through it.
+- **A layout cannot clear a cookie**, so it redirects to `/auth/signout?reason=…`, which
+  can. That route is why an unusable session ends rather than merely being redirected.
+
+`getSessionSnapshot()` returns `{ session }` or `{ session: null, reason, detail }`, and
+`requireSession` throws `SessionError` carrying that reason. **`lookup_failed` is kept
+distinct from `unauthorized`**: an unexposed schema or a revoked grant also returns no
+profile row, and telling someone their account is unregistered when the database is simply
+unreachable sends them to the administrator to fix an account that was never broken.
+
 ### Office scope — one person, several departments
 
 `user_profiles.office_id` is the **primary** office: what the topbar shows, what a new
@@ -442,7 +466,8 @@ already and are not affected by the above.
 ### Route Structure
 
 All authenticated routes live under `/dashboard`. The dashboard layout is a **Server
-Component**: it resolves `getSessionSnapshot()` once and hands it to `SessionProvider`
+Component**: it resolves `getSessionSnapshot()` once (redirecting to `/auth/signout` when
+that comes back empty — see **Auth Flow**) and hands it to `SessionProvider`
 (`src/lib/hooks/use-session.tsx`), which backs `useAuth`, `useProfile`, and
 `usePermissions`. Those hooks do **no** fetching — permission checks are correct on the
 first render, and adding a call site costs nothing.

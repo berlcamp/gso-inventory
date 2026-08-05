@@ -1,4 +1,6 @@
+import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
+import { clearAuthCookies } from "@/lib/auth/cookies"
 import { createClient } from "@/lib/supabase/server"
 
 export async function GET(request: Request) {
@@ -20,6 +22,29 @@ export async function GET(request: Request) {
   }
 
   const supabase = await createClient()
+
+  /**
+   * Turns the sign-in away, and takes the session with it.
+   *
+   * `signOut()` alone is not enough: it writes the cookie expiry through
+   * `next/headers`, not onto the `NextResponse` returned here, so a denied
+   * account could keep a perfectly valid session. That is the redirect loop —
+   * the proxy sees a signed-in user on `/auth`, sends them to `/dashboard`,
+   * whose layout finds no usable profile and sends them back.
+   */
+  async function deny(error: string, detail?: string) {
+    await supabase.auth.signOut()
+    const target = new URL("/auth", origin)
+    target.searchParams.set("error", error)
+    if (detail) target.searchParams.set("detail", detail)
+    const response = NextResponse.redirect(target)
+    clearAuthCookies(
+      response,
+      (await cookies()).getAll().map((c) => c.name)
+    )
+    return response
+  }
+
   const { error } = await supabase.auth.exchangeCodeForSession(code)
   if (error) {
     return NextResponse.redirect(`${origin}/auth?error=auth_callback_error`)
@@ -45,19 +70,11 @@ export async function GET(request: Request) {
   // a missing schema exposure or grant looks identical to an unknown account.
   if (profileError) {
     console.error("[auth/callback] profile lookup failed:", profileError)
-    await supabase.auth.signOut()
-    return NextResponse.redirect(
-      `${origin}/auth?error=lookup_failed&detail=${encodeURIComponent(
-        profileError.message
-      )}`
-    )
+    return deny("lookup_failed", profileError.message)
   }
 
   if (profile) {
-    if (profile.is_active === false) {
-      await supabase.auth.signOut()
-      return NextResponse.redirect(`${origin}/auth?error=deactivated`)
-    }
+    if (profile.is_active === false) return deny("deactivated")
     return redirect(next)
   }
 
@@ -74,12 +91,7 @@ export async function GET(request: Request) {
 
   if (preRegisteredError) {
     console.error("[auth/callback] pre-registration lookup failed:", preRegisteredError)
-    await supabase.auth.signOut()
-    return NextResponse.redirect(
-      `${origin}/auth?error=lookup_failed&detail=${encodeURIComponent(
-        preRegisteredError.message
-      )}`
-    )
+    return deny("lookup_failed", preRegisteredError.message)
   }
 
   if (preRegistered && preRegistered.id !== user.id) {
@@ -147,6 +159,5 @@ export async function GET(request: Request) {
   }
 
   // Not on file — no access.
-  await supabase.auth.signOut()
-  return NextResponse.redirect(`${origin}/auth?error=unauthorized`)
+  return deny("unauthorized")
 }

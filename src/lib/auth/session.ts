@@ -10,6 +10,35 @@ import { createClient } from "@/lib/supabase/server"
 
 export const SCHEMA = "gso_inventory" as const
 
+/**
+ * Why a session could not be resolved. These are the codes `/auth` renders, so
+ * a user turned away is told which of the four it was rather than "please try
+ * again" — the fixes are different and only one of them is theirs.
+ */
+export const SESSION_FAILURES = [
+  "unauthenticated",
+  "unauthorized",
+  "deactivated",
+  "lookup_failed",
+] as const
+
+export type SessionFailure = (typeof SESSION_FAILURES)[number]
+
+export function isSessionFailure(value: string | null): value is SessionFailure {
+  return (SESSION_FAILURES as readonly string[]).includes(value ?? "")
+}
+
+/** An `Error` that also says which failure it was, for the redirect target. */
+export class SessionError extends Error {
+  readonly reason: SessionFailure
+
+  constructor(reason: SessionFailure, message: string) {
+    super(message)
+    this.name = "SessionError"
+    this.reason = reason
+  }
+}
+
 export interface SessionOffice {
   id: string
   name: string
@@ -101,13 +130,16 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
     data: { user },
   } = await supabase.auth.getUser()
 
-  if (!user) throw new Error("Not signed in.")
+  if (!user) throw new SessionError("unauthenticated", "Not signed in.")
 
   // Profile, roles, and office memberships are independent — one round trip,
   // not three. The roles query walks user_roles → roles → role_permissions →
   // permissions in a single PostgREST embed instead of a two-step fetch.
-  const [{ data: profile }, { data: userRoles }, { data: userOffices }] =
-    await Promise.all([
+  const [
+    { data: profile, error: profileError },
+    { data: userRoles },
+    { data: userOffices },
+  ] = await Promise.all([
       supabase
         .schema(SCHEMA)
         .from("user_profiles")
@@ -128,8 +160,23 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
         .eq("user_id", user.id),
     ])
 
-  if (!profile) throw new Error("No profile is registered for this account.")
-  if (profile.is_active === false) throw new Error("This account is deactivated.")
+  // A failed query is not the same as "not registered". A missing schema
+  // exposure or a revoked grant returns no row either, and telling someone
+  // their account is unauthorized when the database is simply unreachable
+  // sends them to the administrator to fix an account that is already fine.
+  // The auth callback already draws this line; this is the same distinction
+  // on the path every other request takes.
+  if (profileError) throw new SessionError("lookup_failed", profileError.message)
+
+  if (!profile) {
+    throw new SessionError(
+      "unauthorized",
+      "No profile is registered for this account."
+    )
+  }
+  if (profile.is_active === false) {
+    throw new SessionError("deactivated", "This account is deactivated.")
+  }
 
   const rows = (userRoles ?? []) as unknown as UserRoleRow[]
   const roles = [...new Set(rows.map((r) => r.role?.code).filter(Boolean) as string[])]
@@ -176,28 +223,48 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
 })
 
 /**
- * Resolves the session for the browser. Returns `null` instead of throwing so
- * the dashboard layout can redirect rather than render an error boundary.
+ * The session, or why there isn't one. Carrying the reason out is what lets
+ * the layout send someone to a page that explains itself: a bare redirect to
+ * `/auth` tells a deactivated user, an unregistered one, and one whose
+ * database is unreachable exactly the same nothing.
+ */
+export type SessionResult =
+  | { session: SessionSnapshot; reason?: never; detail?: never }
+  | { session: null; reason: SessionFailure; detail?: string }
+
+/**
+ * Resolves the session for the browser. Returns a result instead of throwing
+ * so the dashboard layout can redirect rather than render an error boundary.
  *
  * This is what lets the client stop fetching its own auth state: previously
  * `useAuth`, `useProfile`, and every `usePermissions` call site each fired
  * their own requests on mount, so the sidebar and page actions popped in late.
  */
-export async function getSessionSnapshot(): Promise<SessionSnapshot | null> {
+export async function getSessionSnapshot(): Promise<SessionResult> {
   try {
     const ctx = await requireSession()
     return {
-      userId: ctx.userId,
-      email: ctx.profile.email || ctx.authEmail,
-      avatarUrl: ctx.profile.avatar_url ?? ctx.authAvatarUrl,
-      profile: ctx.profile,
-      roles: ctx.roles,
-      permissions: ctx.permissions,
-      officeIds: ctx.officeIds,
-      offices: ctx.offices,
+      session: {
+        userId: ctx.userId,
+        email: ctx.profile.email || ctx.authEmail,
+        avatarUrl: ctx.profile.avatar_url ?? ctx.authAvatarUrl,
+        profile: ctx.profile,
+        roles: ctx.roles,
+        permissions: ctx.permissions,
+        officeIds: ctx.officeIds,
+        offices: ctx.offices,
+      },
     }
-  } catch {
-    return null
+  } catch (e) {
+    // Anything that is not a recognised session failure got as far as a live
+    // query and came back broken, so it is reported as one — with the message,
+    // which is usually the only clue about what the database refused.
+    const reason = e instanceof SessionError ? e.reason : "lookup_failed"
+    return {
+      session: null,
+      reason,
+      detail: reason === "lookup_failed" ? toError(e) : undefined,
+    }
   }
 }
 
