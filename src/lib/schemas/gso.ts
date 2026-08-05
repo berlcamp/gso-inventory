@@ -91,25 +91,47 @@ export const adjustStockSchema = z.object({
   remarks: z.string().trim().max(300).optional().nullable(),
 })
 
-export const userSchema = z
-  .object({
-    email: z.string().trim().toLowerCase().email("Enter a valid Google email."),
-    full_name: z.string().trim().min(2, "Full name is required.").max(150),
-    position: z.string().trim().max(100).optional().nullable(),
-    /** The primary office — shown in the topbar, and the default when filing. */
-    office_id: z.string().uuid("Assign an office.").nullable(),
-    /**
-     * Every office this person acts for, primary included. One person can cover
-     * several departments with the same roles; the action normalizes the
-     * primary into this set so the two can never disagree.
-     */
-    office_ids: z.array(z.string().uuid()).default([]),
-    role_ids: z.array(z.string().uuid()).default([]),
-  })
-  .refine((v) => v.office_id !== null || v.office_ids.length === 0, {
-    message: "Pick a primary office before assigning additional ones.",
-    path: ["office_id"],
-  })
+/**
+ * The fields, unrefined. `.omit()` refuses to run on an object that already
+ * carries refinements, and editing a user is exactly that call — the email is
+ * the auth identity and is not editable — so the check below is attached to
+ * each exported schema rather than baked into the shared shape.
+ */
+const userFieldsSchema = z.object({
+  email: z.string().trim().toLowerCase().email("Enter a valid Google email."),
+  full_name: z.string().trim().min(2, "Full name is required.").max(150),
+  position: z.string().trim().max(100).optional().nullable(),
+  /** The primary office — shown in the topbar, and the default when filing. */
+  office_id: z.string().uuid("Assign an office.").nullable(),
+  /**
+   * Every office this person acts for, primary included. One person can cover
+   * several departments with the same roles; the action normalizes the
+   * primary into this set so the two can never disagree.
+   */
+  office_ids: z.array(z.string().uuid()).default([]),
+  role_ids: z.array(z.string().uuid()).default([]),
+})
+
+/** Additional offices hang off the primary, so a set without one is nonsense. */
+const hasPrimaryOffice = (v: {
+  office_id: string | null
+  office_ids: string[]
+}) => v.office_id !== null || v.office_ids.length === 0
+
+const primaryOfficeIssue = {
+  message: "Pick a primary office before assigning additional ones.",
+  path: ["office_id"],
+}
+
+export const userSchema = userFieldsSchema.refine(
+  hasPrimaryOffice,
+  primaryOfficeIssue
+)
+
+/** Editing a user: same shape minus the email, which is the auth identity. */
+export const userUpdateSchema = userFieldsSchema
+  .omit({ email: true })
+  .refine(hasPrimaryOffice, primaryOfficeIssue)
 
 export type SupplyRequestFormValues = z.infer<typeof supplyRequestSchema>
 export type AcknowledgeReleaseValues = z.infer<typeof acknowledgeReleaseSchema>
@@ -117,3 +139,4 @@ export type OfficeFormValues = z.infer<typeof officeSchema>
 export type ItemFormValues = z.infer<typeof itemSchema>
 export type AdjustStockFormValues = z.infer<typeof adjustStockSchema>
 export type UserFormValues = z.infer<typeof userSchema>
+export type UserUpdateValues = z.infer<typeof userUpdateSchema>

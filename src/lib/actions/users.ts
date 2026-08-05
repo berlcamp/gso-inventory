@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache"
 import { randomUUID } from "crypto"
 import { requirePermission, toError, SCHEMA } from "@/lib/auth/session"
 import { createAdminClient } from "@/lib/supabase/admin"
-import { userSchema } from "@/lib/schemas/gso"
+import { userSchema, userUpdateSchema } from "@/lib/schemas/gso"
 import type { ActionResult, Role, UserProfileRow } from "@/types/database"
 
 /**
@@ -128,7 +128,7 @@ export async function updateUser(
 ): Promise<ActionResult> {
   try {
     await requirePermission("admin.manage")
-    const parsed = userSchema.omit({ email: true }).safeParse(input)
+    const parsed = userUpdateSchema.safeParse(input)
     if (!parsed.success) return { error: parsed.error.issues[0].message, data: null }
     const values = parsed.data
 
