@@ -10,6 +10,7 @@ import {
 } from "@/lib/auth/session"
 import {
   acknowledgeReleaseSchema,
+  requestUpdateSchema,
   supplyRequestSchema,
 } from "@/lib/schemas/gso"
 import { getSystemSettings } from "@/lib/actions/settings"
@@ -17,11 +18,18 @@ import {
   checkAgainstAvailability,
   loadAvailability,
 } from "@/lib/inventory/availability"
+import {
+  canViewRequest,
+  requestQueryScope,
+  requestVisibility,
+  requestVisibilityOrFilter,
+} from "@/lib/requests/visibility"
 import type {
   ActionResult,
   ItemAvailability,
   RequestLogRow,
   RequestReleaseRow,
+  RequestStatus,
   SupplyRequestRow,
 } from "@/types/database"
 
@@ -54,13 +62,28 @@ const REQUEST_DETAIL_SELECT = `
   )
 `
 
+/**
+ * One wording for every read that refuses. The two halves of the rule are both
+ * in it on purpose: "not yours" alone reads as a bug to a GSO user who can see
+ * the same office's other slips.
+ */
+const REQUEST_NOT_VISIBLE =
+  "You can only view your own offices' requests, and other offices' requests once they have been endorsed to GSO."
+
 /* ── Department head helpers ───────────────────────────────────────────── */
 
 /**
+ * Whether the caller may **act** on this office's slip.
+ *
+ * Deliberately not the same question as whether they may see it — that one is
+ * `canViewRequest` in `@/lib/requests/visibility`, and it is narrower: GSO sees
+ * another office's request only from `pending` on. Acting is gated by status and
+ * permission on top of this, so a wider office rule here cannot let anyone into
+ * a stage that is not theirs, and `request.view_all` holders staying unscoped is
+ * what keeps admin able to unblock a slip whose head is away.
+ *
  * A department head acts on their **own** offices only, exactly as a supply
- * officer is scoped to theirs. `request.view_all` holders (admin, GSO) are
- * deliberately unscoped so a slip is never stranded when an office's head is
- * unavailable.
+ * officer is scoped to theirs.
  *
  * `officeIds` is a set because one person can cover several departments — see
  * `SessionContext.officeIds`.
@@ -121,6 +144,11 @@ async function officeHasDepartmentHead(
  * Every request the caller may see, unpaginated — the requests table filters in
  * the browser. Grows over a fiscal year but stays in the low thousands: one row
  * per requisition slip, not per line item.
+ *
+ * "May see" is `requestQueryScope`: own offices at every stage, and every other
+ * office only from `pending` on. The page filters in the browser, so this query
+ * carries no status of its own and gets the `split` scope — one `or`, because
+ * neither an office list nor an unfiltered read expresses it.
  */
 export async function getAllRequests(): Promise<
   ActionResult<SupplyRequestRow[]>
@@ -134,9 +162,12 @@ export async function getAllRequests(): Promise<
       .select(REQUEST_SELECT)
       .order("requested_at", { ascending: false })
 
-    if (!ctx.canViewAll) {
-      if (ctx.officeIds.length === 0) return { error: null, data: [] }
-      query = query.in("office_id", ctx.officeIds)
+    const scope = requestQueryScope(requestVisibility(ctx))
+    if (scope.kind === "offices") {
+      if (scope.officeIds.length === 0) return { error: null, data: [] }
+      query = query.in("office_id", scope.officeIds)
+    } else if (scope.kind === "split") {
+      query = query.or(requestVisibilityOrFilter(scope.officeIds))
     }
 
     const { data, error } = await query
@@ -165,8 +196,11 @@ export async function getRequest(
 
     const row = data as unknown as SupplyRequestRow
 
-    if (!canActForOffice(ctx, row.office_id)) {
-      return { error: "You can only view your own office's requests.", data: null }
+    // Not `canActForOffice`: GSO sees another office's slip from `pending` on,
+    // and a request nobody has endorsed yet is the department's own business.
+    // Without this, the list hid it and the URL handed it over anyway.
+    if (!canViewRequest(requestVisibility(ctx), row)) {
+      return { error: REQUEST_NOT_VISIBLE, data: null }
     }
 
     return { error: null, data: row }
@@ -175,11 +209,32 @@ export async function getRequest(
   }
 }
 
+/**
+ * The request's timeline. Scoped like the request itself: the log names who did
+ * what to a slip and why, which is no more public than the slip.
+ */
 export async function getRequestLogs(
   requestId: string
 ): Promise<ActionResult<RequestLogRow[]>> {
   try {
     const ctx = await requireSession()
+
+    const { data: request } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("office_id, status, endorsed_at, reviewed_at")
+      .eq("id", requestId)
+      .maybeSingle()
+
+    if (!request) return { error: "Request not found.", data: [] }
+    if (
+      !canViewRequest(requestVisibility(ctx), {
+        office_id: request.office_id as string,
+        status: request.status as RequestStatus,
+      })
+    ) {
+      return { error: REQUEST_NOT_VISIBLE, data: [] }
+    }
 
     const { data, error } = await ctx.supabase
       .schema(SCHEMA)
@@ -211,16 +266,18 @@ export async function getRequestReleases(
     const { data: request } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
-      .select("office_id")
+      .select("office_id, status, endorsed_at, reviewed_at")
       .eq("id", requestId)
       .maybeSingle()
 
     if (!request) return { error: "Request not found.", data: [] }
-    if (!canActForOffice(ctx, request.office_id as string)) {
-      return {
-        error: "You can only view your own office's requests.",
-        data: [],
-      }
+    if (
+      !canViewRequest(requestVisibility(ctx), {
+        office_id: request.office_id as string,
+        status: request.status as RequestStatus,
+      })
+    ) {
+      return { error: REQUEST_NOT_VISIBLE, data: [] }
     }
 
     const { data, error } = await ctx.supabase
@@ -265,7 +322,9 @@ export async function getRequestAvailability(
     const { data: request } = await ctx.supabase
       .schema(SCHEMA)
       .from("requests")
-      .select("office_id, fiscal_year, request_items(item_id)")
+      .select(
+        "office_id, status, endorsed_at, reviewed_at, fiscal_year, request_items(item_id)"
+      )
       .eq("id", requestId)
       .maybeSingle()
 
@@ -273,8 +332,15 @@ export async function getRequestAvailability(
 
     const row = request as unknown as {
       office_id: string
+      status: RequestStatus
       fiscal_year: number
       request_items: { item_id: string }[] | null
+    }
+
+    // These are the office's balances, item by item. Scoped like the request
+    // they belong to — the same read the detail page and the edit form make.
+    if (!canViewRequest(requestVisibility(ctx), row)) {
+      return { error: REQUEST_NOT_VISIBLE, data: {} }
     }
     const itemIds = [...new Set((row.request_items ?? []).map((l) => l.item_id))]
 
@@ -424,6 +490,310 @@ export async function createRequest(
   } catch (e) {
     return { error: toError(e), data: null }
   }
+}
+
+/**
+ * Rewrite a slip nobody has endorsed yet — purpose, remarks, and the item list
+ * itself, lines added and removed included.
+ *
+ * Open to **both** desks on the requesting office's own side of the request:
+ * the supply officer who files and the department head who is about to endorse.
+ * Without it a wrong figure or a forgotten item means cancelling and filing
+ * again, which spends a RIS number and the slip's place in the queue on a typo.
+ *
+ * The window closes at endorsement, and that is the whole safety argument.
+ * From `pending` on, the slip carries other people's numbers — endorsed, then
+ * recommended, then approved — and each is a ceiling read off the one below it.
+ * Editing beneath them would silently re-point a stage nobody revisited: cut a
+ * filed quantity under an endorsement and the head's figure now exceeds it,
+ * which is the one thing every check downstream assumes cannot happen.
+ *
+ * A head editing here does overwrite `quantity_requested`, the supply
+ * officer's own column. That is the trade this stage asks for, and what keeps
+ * it attributable is the `updated` log entry: it records every line that moved
+ * and both of its numbers, so the filed figure survives on the timeline instead
+ * of being silently replaced.
+ */
+export async function updateRequest(
+  requestId: string,
+  input: unknown
+): Promise<ActionResult> {
+  try {
+    const ctx = await requireSession()
+
+    // Either desk on the office's side of the slip. Deliberately not
+    // `request.approve`: GSO's answer to a request it cannot fill is to cut it
+    // at their own stage, not to rewrite what the office asked for.
+    if (
+      !ctx.permissions.includes("request.create") &&
+      !ctx.permissions.includes("request.endorse")
+    ) {
+      return {
+        error: "You do not have permission to edit supply requests.",
+        data: null,
+      }
+    }
+
+    const parsed = requestUpdateSchema.safeParse(input)
+    if (!parsed.success) {
+      return { error: parsed.error.issues[0].message, data: null }
+    }
+    const values = parsed.data
+
+    const { data: request, error: readError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .select("id, status, office_id, fiscal_year, purpose, remarks")
+      .eq("id", requestId)
+      .maybeSingle()
+
+    if (readError) return { error: readError.message, data: null }
+    if (!request) return { error: "Request not found.", data: null }
+    if (request.status !== "awaiting_endorsement") {
+      return {
+        error:
+          "This request has already been endorsed, so it can no longer be edited. File a new request instead.",
+        data: null,
+      }
+    }
+
+    // You cannot edit what you cannot see. `canActForOffice` alone is too wide
+    // here: it waives the office match for `request.view_all`, and a GSO user
+    // who is also their own office's supply officer holds `request.create` —
+    // which would have let them rewrite another department's unendorsed slip,
+    // the exact request the list and the detail page now refuse to show them.
+    const target = {
+      office_id: request.office_id as string,
+      status: request.status as RequestStatus,
+    }
+    if (!canViewRequest(requestVisibility(ctx), target)) {
+      return { error: REQUEST_NOT_VISIBLE, data: null }
+    }
+    if (!canActForOffice(ctx, target.office_id)) {
+      return {
+        error: "You can only edit requests from your own office.",
+        data: null,
+      }
+    }
+
+    // Collapse duplicate item lines, exactly as filing does — the table is
+    // unique per (request, item).
+    const merged = new Map<string, number>()
+    for (const line of values.lines) {
+      merged.set(line.item_id, (merged.get(line.item_id) ?? 0) + line.quantity)
+    }
+
+    // The fiscal year comes off the request rather than settings. The row
+    // already carries one, `office_stocks` is keyed by it, and `release_request`
+    // reads it back off the request — so validating against the year in
+    // settings would check a different shelf than the release will draw from if
+    // the two have since diverged.
+    const fiscalYear = request.fiscal_year as number
+    const [availability, { data: settings }] = await Promise.all([
+      loadAvailability(
+        ctx,
+        request.office_id as string,
+        [...merged.keys()],
+        fiscalYear,
+        requestId
+      ),
+      getSystemSettings(),
+    ])
+    const problem = checkAgainstAvailability(
+      [...merged.entries()].map(([item_id, quantity]) => ({
+        item_id,
+        quantity,
+      })),
+      availability,
+      fiscalYear,
+      settings.allow_over_release
+    )
+    if (problem) return { error: problem, data: null }
+
+    const { data: existingLines, error: linesError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_items")
+      .select("id, item_id, quantity_requested, item:items(name)")
+      .eq("request_id", requestId)
+
+    if (linesError) return { error: linesError.message, data: null }
+
+    const existing = (existingLines ?? []) as unknown as {
+      id: string
+      item_id: string
+      quantity_requested: number
+      item: { name: string } | null
+    }[]
+
+    // Names for the log entry. Only the added items need looking up — every
+    // other name came back with the lines above.
+    const nameById = new Map(
+      existing.map((l) => [l.item_id, l.item?.name ?? "an item"])
+    )
+    const addedIds = [...merged.keys()].filter((id) => !nameById.has(id))
+    if (addedIds.length > 0) {
+      const { data: items } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("items")
+        .select("id, name")
+        .in("id", addedIds)
+      for (const item of (items ?? []) as { id: string; name: string }[]) {
+        nameById.set(item.id, item.name)
+      }
+    }
+
+    const changes = describeRequestChanges(
+      {
+        purpose: request.purpose as string,
+        remarks: (request.remarks as string | null) ?? null,
+        lines: existing,
+      },
+      { purpose: values.purpose, remarks: values.remarks ?? null, merged },
+      nameById
+    )
+
+    // Nothing to do, and nothing worth putting on the timeline either — a log
+    // row that records no change is noise in the one place the office looks to
+    // find out what someone did to their slip.
+    if (changes.length === 0) return { error: null, data: null }
+
+    // The header goes first, guarded on the status, and reports whether the
+    // predicate matched. If a head endorsed the slip in the meantime, the
+    // update touches nothing and bailing here means the lines are never
+    // rewritten underneath a stage that has already read them.
+    const { data: touched, error: headerError } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("requests")
+      .update({
+        purpose: values.purpose,
+        remarks: values.remarks ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", requestId)
+      .eq("status", "awaiting_endorsement")
+      .select("id")
+
+    if (headerError) return { error: headerError.message, data: null }
+    if (!touched || touched.length === 0) {
+      return {
+        error:
+          "This request moved on while you were editing it, so nothing was changed. Reload the page to see where it stands.",
+        data: null,
+      }
+    }
+
+    // Added and changed first, removed last: a failure part-way then leaves a
+    // line too many rather than a line too few. The slip still asks for at
+    // least everything it used to, and editing again finishes the job.
+    if (addedIds.length > 0) {
+      const { error } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("request_items")
+        .insert(
+          addedIds.map((item_id) => ({
+            request_id: requestId,
+            item_id,
+            quantity_requested: merged.get(item_id) ?? 0,
+          }))
+        )
+      if (error) return { error: error.message, data: null }
+    }
+
+    for (const line of existing) {
+      const quantity = merged.get(line.item_id)
+      if (quantity === undefined) continue
+      if (Number(line.quantity_requested) === quantity) continue
+
+      const { error } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("request_items")
+        .update({ quantity_requested: quantity })
+        .eq("id", line.id)
+        .eq("request_id", requestId)
+      if (error) return { error: error.message, data: null }
+    }
+
+    const removed = existing.filter((l) => !merged.has(l.item_id))
+    if (removed.length > 0) {
+      const { error } = await ctx.supabase
+        .schema(SCHEMA)
+        .from("request_items")
+        .delete()
+        .in(
+          "id",
+          removed.map((l) => l.id)
+        )
+        .eq("request_id", requestId)
+      if (error) return { error: error.message, data: null }
+    }
+
+    await ctx.supabase.schema(SCHEMA).from("request_logs").insert({
+      request_id: requestId,
+      stage: "awaiting_endorsement",
+      action: "updated",
+      actor_id: ctx.userId,
+      remarks: changes.join("; "),
+    })
+
+    revalidatePath(`/dashboard/requests/${requestId}`)
+    revalidatePath("/dashboard/requests")
+    revalidatePath("/dashboard")
+    return { error: null, data: null }
+  } catch (e) {
+    return { error: toError(e), data: null }
+  }
+}
+
+/**
+ * What the edit actually did, in words, for the `updated` log entry.
+ *
+ * This is the whole audit trail for an edit — there is no per-column history —
+ * so a changed quantity carries **both** numbers. A head who raises a line here
+ * is otherwise indistinguishable from a supply officer who filed that figure in
+ * the first place.
+ *
+ * Not exported: a `"use server"` module may only export async functions.
+ */
+function describeRequestChanges(
+  before: {
+    purpose: string
+    remarks: string | null
+    lines: { item_id: string; quantity_requested: number }[]
+  },
+  after: { purpose: string; remarks: string | null; merged: Map<string, number> },
+  nameById: Map<string, string>
+): string[] {
+  const changes: string[] = []
+  const name = (id: string) => nameById.get(id) ?? "an item"
+  const qty = (value: number) => value.toLocaleString()
+
+  for (const line of before.lines) {
+    const next = after.merged.get(line.item_id)
+    const previous = Number(line.quantity_requested)
+    if (next === undefined) {
+      changes.push(`removed ${name(line.item_id)} (was ${qty(previous)})`)
+    } else if (next !== previous) {
+      changes.push(`${name(line.item_id)} ${qty(previous)} → ${qty(next)}`)
+    }
+  }
+
+  const beforeItems = new Set(before.lines.map((l) => l.item_id))
+  for (const [itemId, quantity] of after.merged) {
+    if (beforeItems.has(itemId)) continue
+    changes.push(`added ${name(itemId)} ${qty(quantity)}`)
+  }
+
+  if (before.purpose !== after.purpose) changes.push("purpose revised")
+  if ((before.remarks ?? "") !== (after.remarks ?? "")) {
+    changes.push("remarks revised")
+  }
+
+  // A slip can carry hundreds of lines; the timeline entry is a summary, not a
+  // diff. The trailing count is what keeps it from reading as the whole story.
+  if (changes.length > 8) {
+    return [...changes.slice(0, 8), `and ${changes.length - 8} more changes`]
+  }
+  return changes
 }
 
 /**
@@ -1072,6 +1442,19 @@ export async function cancelRequest(
       ctx.permissions.includes("request.endorse")
     if (!isOwner && !canReview) {
       return { error: "You cannot cancel this request.", data: null }
+    }
+
+    // `canReview` is unscoped by office, which was fine while GSO could see
+    // every slip. It no longer can: withdrawing another department's request
+    // before they have even endorsed it is not a decision a GSO desk that
+    // cannot see the request should be making.
+    if (
+      !canViewRequest(requestVisibility(ctx), {
+        office_id: request.office_id as string,
+        status: request.status as RequestStatus,
+      })
+    ) {
+      return { error: REQUEST_NOT_VISIBLE, data: null }
     }
 
     const { error } = await ctx.supabase

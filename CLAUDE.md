@@ -13,9 +13,11 @@ npm run lint      # ESLint (Next.js config, v9 flat config in eslint.config.mjs)
 npm run test      # Vitest (config in vitest.config.mts — it does not read tsconfig paths)
 ```
 
-The suite covers pure logic only — `src/**/*.test.ts`, currently just
-`src/lib/notifications/feed.test.ts`. Nothing mocks Supabase, so anything worth testing
-has to be extractable as a plain function first; that constraint is the point.
+The suite covers pure logic only — `src/**/*.test.ts`: `notifications/feed.test.ts`,
+`requests/receipt.test.ts`, `requests/visibility.test.ts`. Nothing mocks Supabase, so
+anything worth testing has to be extractable as a plain function first; that constraint is
+the point. Request visibility is the clearest case — the rule is pure, the consequence of
+getting it wrong is a leak, and pulling it out of the actions is what made it testable.
 
 ## Architecture
 
@@ -111,9 +113,33 @@ one that lets admin endorse when an office's head is away. **Nothing moves past 
 until somebody holds the role**; migration 16's closing `SELECT` reports how many requests
 are waiting and how many people can move them.
 
+**A slip is editable until it is endorsed, and only then.** `updateRequest` rewrites the
+purpose, the remarks, and the item list — lines added and removed included — and is open to
+both desks on the requesting office's own side: `request.create` (the supply officer who
+files) or `request.endorse` (the head who is about to endorse), plus the office match every
+department-side action runs. Deliberately **not** `request.approve`: GSO's answer to a
+request it cannot fill is to cut it at their own stage, not to rewrite what the office
+asked for. The edit lives at `/dashboard/requests/[id]/edit`, reusing the new-request
+form's `ItemLineEditor`; the quantities are re-checked against `balance - committed` exactly
+as filing does, so an edit can no more promise absent stock than a fresh slip can.
+
+The window closes at endorsement because from `pending` on the slip carries other people's
+numbers, and each is a ceiling read off the one below it. Cutting a filed quantity under an
+existing endorsement would leave the head's figure above it — the one thing every check
+downstream assumes cannot happen. This is also why editing is not a substitute for
+`cancelRequest`, which stays open through `recommended`: withdrawing a slip invalidates
+nothing, rewriting one does.
+
+A head editing here does overwrite `quantity_requested`, the supply officer's own column.
+What keeps that attributable is the `updated` log entry: `describeRequestChanges` records
+every line that moved with **both** of its numbers, so the filed figure survives on the
+timeline rather than being silently replaced. The `updated` action has been in the
+`request_action` enum since migration 1 and needed no migration to reach.
+
 Side exits: `rejected`, `cancelled`. `partially_released` sits between approved and released
 when only some of the approved quantity has gone out. Rejection is terminal at either
-stage — there is no edit-and-resubmit flow, so a corrected slip is filed as a new request.
+stage — there is no edit-and-resubmit flow past endorsement, so a slip corrected after it
+reaches GSO is filed as a new request.
 The head can reject at `pending` or `recommended`, so a junk slip is never stuck waiting to
 be checked first. A request is cancellable while `awaiting_endorsement`, `pending`, or
 `recommended` — i.e. right up to GSO's approval, since nothing is committed before it.
@@ -188,11 +214,12 @@ An office can only ever draw items **it holds an allocation for**, and only from
 **its own** `office_stocks` row — `release_request` takes the office id from the request
 row, never from caller input, so there is no path to another office's balance.
 
-The quantity limit is checked in five places, and they must agree:
+The quantity limit is checked in six places, and they must agree:
 
 | Where | Checks against |
 |---|---|
 | `createRequest` | `balance - committed` |
+| `updateRequest` | `balance - committed`, excluding the request being edited |
 | `endorseRequest` | `balance - committed`, excluding the request being endorsed |
 | `recommendRequest` | `balance - committed`, excluding the request being checked |
 | `approveRequest` | `balance - committed`, excluding the request being approved |
@@ -206,6 +233,14 @@ something already enforced. The balance can also have moved since filing.
 read-only stage: recommending a number the head then cannot approve moves the failure one
 desk further from the person who could still have fixed it. It is on top of the
 recommendation's own ceiling — a checker can never recommend more than was endorsed.
+
+`updateRequest` reads the fiscal year **off the request**, not from settings: the row
+already carries one, `office_stocks` is keyed by it, and `release_request` reads it back
+off the request — so checking against a year that has since rolled over in settings would
+validate a different shelf than the release will draw from. It excludes its own request
+from `committed` for the same reason the approve screen does; at `awaiting_endorsement`
+nothing the slip asked for is committed yet, so that exclusion is a no-op today and a
+correctness guard if the editable window ever moves.
 
 `committed` is what other **approved but not yet collected** requests have spoken for.
 Without subtracting it, two requests could each be approved for the whole balance and the
@@ -338,7 +373,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, endorsing, recommending, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
+| `requests.ts` | Filing, editing before endorsement, endorsing, recommending, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -369,16 +404,99 @@ would go back to paying for four auth round trips before fetching any real data.
 Authorization is enforced in server actions, not RLS (RLS gates access to authenticated
 users only). The key distinction is `request.view_all`:
 
-- Holders (admin, GSO head, GSO custodian, GSO checker) see and act on every office.
+- Holders (admin, GSO head, GSO custodian, GSO checker) see and act on every office —
+  **for requests, only from `pending` on**; see below.
 - Without it, a supply officer or department head is scoped to `profile.office_id` for requests, balances, ledger, and dashboard figures.
+
+**`request.view_all` starts at `pending`, not at filing.** A request is visible two ways,
+and `src/lib/requests/visibility.ts` is the one place that says so:
+
+- it belongs to one of the viewer's own offices — **any** stage, unendorsed included
+- it **reached GSO's desk**, and the viewer holds `request.view_all`
+
+Before this, `view_all` meant every request at every stage, which handed the GSO side an
+office's slips while they were still an internal draft — filed, unendorsed, nobody outside
+the department having agreed they should be asked for. GSO has no business with a request
+until the office's own head signs it, and the queues already said so: the checker works
+`pending`, the head works `recommended`. Seeing further back than you can act is not scope,
+it is a leak. A GSO checker who is also their own office's supply officer — one account,
+both roles, which is the common case in a small LGU — therefore sees their own department
+end to end and everyone else's only once endorsed.
+
+The single exception is `request.endorse` **together with** `request.view_all`, which is
+admin and only admin: the escape hatch for an office whose head is away. Endorsing a slip
+you cannot see is not a thing, so the visibility follows the verb rather than being a
+special case for a role name. Admin's view is therefore total, terminal slips included.
+
+**"Reached GSO's desk" is a question about history, not only about status**, and that is why
+`STATUS_RULE` is a record of rules rather than two lists of statuses. Three kinds:
+
+| Kind | Statuses | Visible to `view_all` |
+|---|---|---|
+| pre-GSO | `awaiting_endorsement` | no — own offices only |
+| live | `pending`, `recommended`, `approved`, `partially_released`, `released` | yes |
+| terminal | `rejected` → `reviewed_at`, `cancelled` → `endorsed_at` | only if that column is set |
+
+A slip the department **rejected at endorsement** and one **GSO rejected** both read
+`rejected`, and `endorsed_at` cannot separate them: the head's rejection stamps it too
+(that is deliberate — it is an endorsement-stage decision). `reviewed_at` can, because only
+GSO's own decision writes it. A **cancelled** slip is the mirror image: nobody reviewed it,
+so the endorsement that put it on GSO's desk is the only proof it ever got there. Both were
+verified against live data — the two `cancelled` rows in the database have `endorsed_at`
+NULL, i.e. withdrawn before the head ever saw them, and both are now hidden from other
+offices.
+
+The one thing this costs: a request **cancelled at `pending` before migration 7** existed
+(no endorsement stage, so `endorsed_at` is NULL) would read as "never reached GSO" and be
+hidden. Reconstructing the truth for those rows means reading `request_logs`, which is a
+join per row for a case the pipeline can no longer produce. It fails closed, which is the
+direction a visibility rule should fail.
+
+That module exports three things and they answer for every read: `canViewRequest` (one row —
+the detail page, its logs, its releases, its availability, the dashboard activity feed),
+`requestQueryScope` (a query — `all`, an office list, or `split`), and
+`requestVisibilityOrFilter` (the `split` case as a PostgREST `or`). `split` is the case a
+nullable office list gets wrong: own offices at every stage *plus* every office that reached
+GSO is neither an `.in()` nor an unfiltered read, and returning "no filter" for it is
+exactly the leak. Queries that already name their statuses — every dashboard tile, every
+notification bucket — get `all` or an office list instead and never need the `or`; a
+terminal status stays `split`, since a column and not the status decides it.
+
+The `or` is generated from `STATUS_RULE`, so the SQL and `canViewRequest` cannot disagree
+about which column decides what:
+
+```
+office_id.in.(…),
+status.in.(pending,recommended,approved,partially_released,released),
+and(status.eq.rejected,reviewed_at.not.is.null),
+and(status.eq.cancelled,endorsed_at.not.is.null)
+```
+
+Every clause is positive — `in.()` and `not.is.null` inside `and()` — rather than a negation
+of the hidden set, because the hidden set is the part that depends on a column and
+`not (A and B)` is the shape that goes wrong quietly. `.or()` supplies the enclosing
+parentheses itself (`or=(…)`), so the string must not carry them. The whole expression was
+run against the project's PostgREST before being committed; nested `and()` and `not.is.null`
+inside `or` are both accepted, which is not something the unit tests can tell you.
+
+`canViewRequest` takes `endorsed_at` and `reviewed_at` as **optional** — most callers read a
+request whose status cannot be terminal. A missing stamp reads as "never reached GSO", so
+forgetting the columns in a `select` hides a request rather than leaking it: a visible bug,
+in the safe direction.
+
+`getRequestLogs` and `getRequestAvailability` had no office check at all before this; the
+list hid another office's slip and the URL handed it over anyway. Reports are deliberately
+untouched: `reports.view` is admin/GSO-head/custodian only and its figures are aggregates,
+not slips — `getRequestStatusCounts` still counts every office's `awaiting_endorsement` as
+a number.
 
 Roles: `admin`, `gso_head`, `gso_custodian`, `supply_officer` (migration 2),
 `department_head` (migration 7), and `gso_checker` (migration 16).
 
 **The GSO checker** holds `request.recommend` plus `request.view`, `request.view_all`, and
-`inventory.view` — and deliberately **not** `request.approve`. The queue is GSO-wide, so
-the checker is unscoped like the rest of the GSO side; `inventory.view` is what they trim
-against.
+`inventory.view` — and deliberately **not** `request.approve`. The queue is GSO-wide from
+`pending` on, so the checker is unscoped there like the rest of the GSO side;
+`inventory.view` is what they trim against.
 
 **Department heads** hold `request.endorse` plus `request.view` and `inventory.view` — and
 deliberately **not** `request.create`. Heads review what their supply officer files; they do
@@ -415,9 +533,15 @@ bucket reuses the *same* predicate the matching action enforces:
 
 "Own offices" below means `ctx.officeIds` — the whole set, not just the primary.
 
+The request queues take their office scope from `requestQueryScope` on the bucket's own
+statuses rather than from a local `canViewAll ? null : officeIds`. Today the two agree
+everywhere — no `view_all` holder except admin can endorse — but a bell that offered
+someone an unendorsed slip the list hides and the detail page refuses would be advertising
+work the server denies, which is the one thing this feed must never do. Now it cannot.
+
 | Kind | Permission | Status | Scope |
 |---|---|---|---|
-| `endorse` | `request.endorse` | `awaiting_endorsement` | own offices unless `request.view_all` |
+| `endorse` | `request.endorse` | `awaiting_endorsement` | own offices; every office only with `request.view_all` **and** `request.endorse` (admin) |
 | `check` | `request.recommend` | `pending` | own offices unless `request.view_all` |
 | `review` | `request.approve` | `recommended` | own offices unless `request.view_all` |
 | `dispute` | `request.release` | releases `disputed` and unresolved | own offices unless `request.view_all` |

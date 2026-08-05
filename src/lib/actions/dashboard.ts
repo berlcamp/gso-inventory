@@ -2,6 +2,11 @@
 
 import { requireSession, toError, SCHEMA } from "@/lib/auth/session"
 import { getSystemSettings } from "@/lib/actions/settings"
+import {
+  canViewRequest,
+  requestQueryScope,
+  requestVisibility,
+} from "@/lib/requests/visibility"
 import type { ActionResult, RequestLogRow, RequestStatus } from "@/types/database"
 
 export interface DashboardStats {
@@ -68,6 +73,15 @@ export async function getDashboardStats(): Promise<
     if (scoped && scoped.length === 0) {
       return { error: "No office is assigned to your account.", data: null }
     }
+
+    // The one tile that is nobody's business city-wide: a slip nobody has
+    // endorsed belongs to the office that filed it, so this counts own offices
+    // only — for a GSO user as much as for a supply officer. The scope comes
+    // back as `all` only for admin, who can endorse anywhere and would
+    // otherwise be looking at a queue they hold the permission to clear.
+    const endorsementScope = requestQueryScope(requestVisibility(ctx), [
+      "awaiting_endorsement",
+    ])
 
     const monthStart = startOfMonthISO()
     const { data: settings } = await getSystemSettings()
@@ -144,8 +158,19 @@ export async function getDashboardStats(): Promise<
       .gt("quantity", 0)
       .lte("quantity", lowThreshold)
 
+    if (endorsementScope.kind === "offices" && endorsementScope.officeIds.length > 0) {
+      endorsementQuery = endorsementQuery.in("office_id", endorsementScope.officeIds)
+    }
+
+    // Counted rather than queried when the viewer has no office of their own: a
+    // GSO account with no department cannot have an unendorsed slip, and an
+    // empty `.in()` list is not a filter worth trusting to mean that.
+    const endorsementCount: PromiseLike<{ count: number | null }> =
+      endorsementScope.kind === "offices" && endorsementScope.officeIds.length === 0
+        ? Promise.resolve({ count: 0 })
+        : endorsementQuery
+
     if (scoped) {
-      endorsementQuery = endorsementQuery.in("office_id", scoped)
       pendingQuery = pendingQuery.in("office_id", scoped)
       recommendedQuery = recommendedQuery.in("office_id", scoped)
       awaitingQuery = awaitingQuery.in("office_id", scoped)
@@ -167,7 +192,7 @@ export async function getDashboardStats(): Promise<
       issuedMonth,
       lowStock,
     ] = await Promise.all([
-      endorsementQuery,
+      endorsementCount,
       pendingQuery,
       recommendedQuery,
       awaitingQuery,
@@ -210,16 +235,23 @@ export async function getDashboardStats(): Promise<
 export async function getPipelineCounts(): Promise<ActionResult<PipelineItem[]>> {
   try {
     const ctx = await requireSession()
-    const scoped = !ctx.canViewAll ? ctx.officeIds : null
+    const visibility = requestVisibility(ctx)
 
+    // Per status, so the pre-GSO stage narrows to the viewer's own offices
+    // while the rest stay city-wide for a GSO user. One query each already, so
+    // asking the scope per status costs nothing.
     const results = await Promise.all(
       PIPELINE_STATUSES.map((status) => {
+        const scope = requestQueryScope(visibility, [status])
         const q = ctx.supabase
           .schema(SCHEMA)
           .from("requests")
           .select("*", { count: "exact", head: true })
           .eq("status", status)
-        return scoped ? q.in("office_id", scoped) : q
+
+        if (scope.kind !== "offices") return q
+        if (scope.officeIds.length === 0) return Promise.resolve({ count: 0 })
+        return q.in("office_id", scope.officeIds)
       })
     )
 
@@ -240,28 +272,40 @@ export async function getRecentActivity(
 ): Promise<ActionResult<RequestLogRow[]>> {
   try {
     const ctx = await requireSession()
+    const visibility = requestVisibility(ctx)
+
+    // `status` rides along because the filter below needs it: activity on a
+    // slip that has not been endorsed is only the filing office's to read.
+    // Filtering in code rather than in the query keeps one predicate —
+    // `canViewRequest` — answering for the feed, the list, and the detail page.
+    const filtering = !(
+      visibility.seesOtherOffices && visibility.seesUnendorsedEverywhere
+    )
 
     const { data, error } = await ctx.supabase
       .schema(SCHEMA)
       .from("request_logs")
       .select(
-        "*, actor:user_profiles!actor_id(id, full_name), request:requests!request_id(id, request_no, office_id, office:offices!office_id(id, name, code))"
+        "*, actor:user_profiles!actor_id(id, full_name), request:requests!request_id(id, request_no, office_id, status, endorsed_at, reviewed_at, office:offices!office_id(id, name, code))"
       )
       .order("created_at", { ascending: false })
-      .limit(ctx.canViewAll ? limit : limit * 4)
+      // Over-fetch when rows will be dropped, so a feed of ten still fills up.
+      .limit(filtering ? limit * 4 : limit)
 
     if (error) return { error: error.message, data: [] }
 
     let rows = (data ?? []) as unknown as (RequestLogRow & {
-      request?: { office_id?: string } | null
+      request?: { office_id?: string; status?: RequestStatus } | null
     })[]
 
-    // Supply officers only see activity on their own offices' requests.
-    if (!ctx.canViewAll) {
+    if (filtering) {
       rows = rows
         .filter((r) =>
-          r.request?.office_id
-            ? ctx.officeIds.includes(r.request.office_id)
+          r.request?.office_id && r.request.status
+            ? canViewRequest(visibility, {
+                office_id: r.request.office_id,
+                status: r.request.status,
+              })
             : false
         )
         .slice(0, limit)

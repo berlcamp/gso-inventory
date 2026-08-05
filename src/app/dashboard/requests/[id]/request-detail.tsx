@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import Link from "next/link"
 import { toast } from "sonner"
 import {
   Card,
@@ -42,6 +43,7 @@ import {
   ClipboardCheck,
   Loader2,
   PackageCheck,
+  Pencil,
   Stamp,
   X,
   Ban,
@@ -102,6 +104,11 @@ export function RequestDetail({
     request.status === "approved" || request.status === "partially_released"
   // Withdrawable right up to GSO's approval, at any stage before it.
   const isCancellable = isAwaitingEndorsement || isPending || isRecommended
+  // Editable only before endorsement, and only by the office's own side of the
+  // slip — the officer who files and the head who endorses. Everything past
+  // this stage carries someone else's number as a ceiling; see `updateRequest`.
+  const isEditable =
+    isAwaitingEndorsement && (can("request.create") || can("request.endorse"))
 
   return (
     <div className="space-y-6">
@@ -165,6 +172,19 @@ export function RequestDetail({
                   onDone={() => router.refresh()}
                   onError={setError}
                 />
+              )}
+              {isEditable && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  nativeButton={false}
+                  render={
+                    <Link href={`/dashboard/requests/${request.id}/edit`} />
+                  }
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit
+                </Button>
               )}
               {isCancellable && (
                 <CancelDialog

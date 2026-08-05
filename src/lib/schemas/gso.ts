@@ -23,6 +23,19 @@ export const supplyRequestSchema = z.object({
 })
 
 /**
+ * Editing a slip that has not been endorsed yet — same shape minus the office.
+ *
+ * The office is deliberately not editable. Every allocation check, the fiscal
+ * year on the row, and the set of heads who may endorse all hang off it, so
+ * moving a slip between offices is filing a different request, not editing this
+ * one. `.omit()` works here only because `supplyRequestSchema` carries no
+ * refinements — see `userUpdateSchema` for the case where it does not.
+ */
+export const requestUpdateSchema = supplyRequestSchema.omit({
+  office_id: true,
+})
+
+/**
  * The requesting office's counter-signature on one release.
  *
  * `lines` is optional: omitting it means "everything arrived exactly as
@@ -134,6 +147,7 @@ export const userUpdateSchema = userFieldsSchema
   .refine(hasPrimaryOffice, primaryOfficeIssue)
 
 export type SupplyRequestFormValues = z.infer<typeof supplyRequestSchema>
+export type RequestUpdateValues = z.infer<typeof requestUpdateSchema>
 export type AcknowledgeReleaseValues = z.infer<typeof acknowledgeReleaseSchema>
 export type OfficeFormValues = z.infer<typeof officeSchema>
 export type ItemFormValues = z.infer<typeof itemSchema>

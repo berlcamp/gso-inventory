@@ -10,7 +10,12 @@ import {
   type NotificationRequestRow,
   type NotificationSource,
 } from "@/lib/notifications/feed"
-import type { ActionResult } from "@/types/database"
+import {
+  requestQueryScope,
+  requestVisibility,
+  requestVisibilityOrFilter,
+} from "@/lib/requests/visibility"
+import type { ActionResult, RequestStatus } from "@/types/database"
 
 /** Narrow on purpose — the bell shows a request number, an office, and a time. */
 const NOTIFICATION_SELECT = `
@@ -100,6 +105,8 @@ export async function getNotifications(): Promise<
     const canRelease = ctx.permissions.includes("request.release")
     const canAcknowledge = ctx.permissions.includes("request.acknowledge")
 
+    const visibility = requestVisibility(ctx)
+
     // Scoped users with no office have nothing they could act on. A user may
     // cover several offices, so this is a set and the queues use `.in()`.
     const scopedOffices = ctx.canViewAll ? null : ctx.officeIds
@@ -107,8 +114,20 @@ export async function getNotifications(): Promise<
       return { error: null, data: EMPTY_FEED }
     }
 
-    /** Oldest first: `.limit()` must keep the *longest waiting* rows, not the newest. */
-    const queue = (statuses: string[]) => {
+    /**
+     * Oldest first: `.limit()` must keep the *longest waiting* rows, not the
+     * newest.
+     *
+     * The office scope comes from `requestQueryScope` on the bucket's own
+     * statuses rather than from `scopedOffices`, which is the same answer today
+     * and stays the right one if the roles move: a bell that offered a GSO user
+     * an unendorsed slip would be advertising a request the list hides and the
+     * detail page refuses. `split` cannot arise — every bucket names its
+     * statuses and none mixes the pre-GSO stage with a later one — but it is
+     * handled rather than assumed away.
+     */
+    const queue = (statuses: RequestStatus[]) => {
+      const scope = requestQueryScope(visibility, statuses)
       const q = ctx.supabase
         .schema(SCHEMA)
         .from("requests")
@@ -116,7 +135,12 @@ export async function getNotifications(): Promise<
         .in("status", statuses)
         .order("updated_at", { ascending: true })
         .limit(LIST_LIMIT)
-      return scopedOffices ? q.in("office_id", scopedOffices) : q
+
+      if (scope.kind === "offices") return q.in("office_id", scope.officeIds)
+      if (scope.kind === "split") {
+        return q.or(requestVisibilityOrFilter(scope.officeIds))
+      }
+      return q
     }
 
     /**

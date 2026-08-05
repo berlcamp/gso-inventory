@@ -25,6 +25,7 @@ import {
   ArrowRight,
   AlertCircle,
 } from "lucide-react"
+import { usePermissions } from "@/lib/hooks/use-permissions"
 import type {
   DashboardStats,
   PipelineItem,
@@ -131,6 +132,16 @@ export function DashboardContent({
   topItems: TopItem[]
   lowStock: LowStockEntry[]
 }) {
+  const { can } = usePermissions()
+
+  // A GSO user sees every office from `pending` on, but an unendorsed slip
+  // belongs to the office that filed it — so this one tile, and the pipeline's
+  // first bucket, count their own offices while everything beside them is
+  // city-wide. Saying so is the difference between a scoped number and a wrong
+  // one. Admin endorses anywhere and is therefore not qualified.
+  const endorsementIsOwnOffices =
+    can("request.view_all") && !can("request.endorse")
+
   return (
     <>
       {error && (
@@ -160,7 +171,9 @@ export function DashboardContent({
                     {stats ? stats[stat.key].toLocaleString() : "—"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {stat.description}
+                    {stat.key === "awaitingEndorsement" && endorsementIsOwnOffices
+                      ? "Waiting on your department head — your offices only"
+                      : stat.description}
                   </p>
                 </div>
                 <div
@@ -183,6 +196,8 @@ export function DashboardContent({
               {stats && (
                 <span className="ml-2 text-xs font-normal normal-case tracking-normal text-muted-foreground">
                   · {stats.scopeLabel}
+                  {endorsementIsOwnOffices &&
+                    " (For Endorsement: your offices only)"}
                 </span>
               )}
             </CardTitle>
