@@ -14,7 +14,10 @@ export function usePermissions() {
 
   return {
     permissions,
+    /** Role codes — what `hasRole` and every gate compares against. */
     roles,
+    /** The same roles as display labels, for showing a person their access. */
+    roleNames: session?.roleNames ?? [],
     loading: false,
     can: (permission: string) => permissions.includes(permission),
     canAny: (...perms: string[]) => perms.some((p) => permissions.includes(p)),

@@ -3,7 +3,9 @@
 import { usePathname, useRouter } from "next/navigation"
 import { useAuth } from "@/lib/hooks/use-auth"
 import { useProfile } from "@/lib/hooks/use-profile"
+import { usePermissions } from "@/lib/hooks/use-permissions"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -89,6 +91,7 @@ export function Topbar() {
   const router = useRouter()
   const { user, signOut } = useAuth()
   const { profile } = useProfile()
+  const { roleNames } = usePermissions()
 
   const displayName = profile?.full_name || user?.email || "User"
   const displayEmail = profile?.email || user?.email || ""
@@ -159,6 +162,27 @@ export function Topbar() {
                       {displayEmail}
                     </p>
                   </div>
+                </div>
+
+                {/* What this account may do. Labels come from the roles table
+                    via the session, so a role added by a later migration
+                    shows up here without touching this file. */}
+                <div className="flex flex-wrap gap-1 pb-1">
+                  {roleNames.length === 0 ? (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      No roles assigned
+                    </span>
+                  ) : (
+                    roleNames.map((role) => (
+                      <Badge
+                        key={role}
+                        variant="secondary"
+                        className="max-w-full font-normal"
+                      >
+                        <span className="truncate">{role}</span>
+                      </Badge>
+                    ))
+                  )}
                 </div>
               </DropdownMenuLabel>
             </DropdownMenuGroup>

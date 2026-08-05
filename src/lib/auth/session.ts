@@ -67,6 +67,13 @@ export interface SessionContext {
   userId: string
   profile: SessionProfile
   roles: string[]
+  /**
+   * The display names of `roles`, in the same order — "GSO Head", not
+   * `gso_head`. Read from the `roles` table rather than derived from the code,
+   * so a role added by a later migration labels itself instead of falling
+   * through a map nobody remembered to extend.
+   */
+  roleNames: string[]
   permissions: string[]
   /**
    * Every office this user may act for — **the** office scope, and the only
@@ -99,6 +106,8 @@ export interface SessionSnapshot {
   avatarUrl: string | null
   profile: SessionProfile
   roles: string[]
+  /** See `SessionContext.roleNames`. */
+  roleNames: string[]
   permissions: string[]
   /** See `SessionContext.officeIds`. */
   officeIds: string[]
@@ -109,6 +118,7 @@ export interface SessionSnapshot {
 interface UserRoleRow {
   role: {
     code: string
+    name: string | null
     role_permissions: { permission: { code: string } | null }[] | null
   } | null
 }
@@ -160,7 +170,9 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
       supabase
         .schema(SCHEMA)
         .from("user_roles")
-        .select("role:roles(code, role_permissions(permission:permissions(code)))")
+        .select(
+          "role:roles(code, name, role_permissions(permission:permissions(code)))"
+        )
         .eq("user_id", user.id),
       supabase
         .schema(SCHEMA)
@@ -188,7 +200,16 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
   }
 
   const rows = (userRoles ?? []) as unknown as UserRoleRow[]
-  const roles = [...new Set(rows.map((r) => r.role?.code).filter(Boolean) as string[])]
+  // One pass keyed by code, so `roles` and `roleNames` cannot drift out of
+  // alignment: a Set of codes plus a separately-mapped list of names would
+  // mislabel every role after the first duplicate.
+  const roleNameByCode = new Map<string, string>()
+  for (const row of rows) {
+    if (!row.role?.code) continue
+    roleNameByCode.set(row.role.code, row.role.name || row.role.code)
+  }
+  const roles = [...roleNameByCode.keys()]
+  const roleNames = [...roleNameByCode.values()]
   const permissions = [
     ...new Set(
       rows
@@ -221,6 +242,7 @@ export const requireSession = cache(async function requireSession(): Promise<Ses
     userId: user.id,
     profile: typedProfile,
     roles,
+    roleNames,
     permissions,
     officeIds: offices.map((o) => o.id),
     offices,
@@ -259,6 +281,7 @@ export async function getSessionSnapshot(): Promise<SessionResult> {
         avatarUrl: ctx.profile.avatar_url ?? ctx.authAvatarUrl,
         profile: ctx.profile,
         roles: ctx.roles,
+        roleNames: ctx.roleNames,
         permissions: ctx.permissions,
         officeIds: ctx.officeIds,
         offices: ctx.offices,
