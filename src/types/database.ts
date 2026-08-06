@@ -318,6 +318,26 @@ export type RequestReleaseRow = RequestRelease & {
   request_release_items?: RequestReleaseItemRow[]
 }
 
+/**
+ * One printable delivery receipt — a *release*, plus just enough of the slip it
+ * came off to identify it on paper.
+ *
+ * Keyed on the release rather than the request because that is what a receipt
+ * is: the paper that travels with one trip to the counter. A request handed
+ * over in three batches prints three receipts, each listing only what actually
+ * went out that time.
+ */
+export type DeliveryReceiptData = {
+  release: RequestReleaseRow
+  request: Pick<
+    SupplyRequest,
+    "id" | "request_no" | "purpose" | "fiscal_year"
+  > & {
+    office: Pick<Office, "id" | "name" | "code"> | null
+    requester: Pick<UserProfile, "id" | "full_name"> | null
+  }
+}
+
 export type SupplyRequestRow = SupplyRequest & {
   office: Pick<Office, "id" | "name" | "code"> | null
   requester: Pick<UserProfile, "id" | "full_name" | "email"> | null

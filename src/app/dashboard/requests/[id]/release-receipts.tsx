@@ -53,6 +53,7 @@ import {
   CheckCheck,
   Info,
   Loader2,
+  Printer,
   TriangleAlert,
   Wrench,
 } from "lucide-react"
@@ -175,7 +176,27 @@ function ReleaseCard({
             )}
           </p>
         </div>
-        <ReceiptBadge state={release.ack_status} />
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Its own tab, so printing never takes the custodian off the request
+              they were working — and so the sheet on screen is the sheet that
+              comes out of the printer, with no app chrome around it. */}
+          <Button
+            size="sm"
+            variant="outline"
+            nativeButton={false}
+            render={
+              <a
+                href={`/print/delivery-receipt/${release.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              />
+            }
+          >
+            <Printer className="h-3.5 w-3.5" />
+            Delivery Receipt
+          </Button>
+          <ReceiptBadge state={release.ack_status} />
+        </div>
       </div>
 
       <Table>

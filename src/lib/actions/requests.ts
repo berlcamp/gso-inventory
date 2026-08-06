@@ -26,6 +26,7 @@ import {
 } from "@/lib/requests/visibility"
 import type {
   ActionResult,
+  DeliveryReceiptData,
   ItemAvailability,
   RequestLogRow,
   RequestReleaseRow,
@@ -302,6 +303,79 @@ export async function getRequestReleases(
     return { error: null, data: (data ?? []) as unknown as RequestReleaseRow[] }
   } catch (e) {
     return { error: toError(e), data: [] }
+  }
+}
+
+/**
+ * One release and the slip it came off, for the printable delivery receipt.
+ *
+ * Fetched by release id rather than by request id because the paper is per
+ * *trip*: a partially released request prints one receipt now and another when
+ * the rest goes out, each listing only what physically moved that time. Reading
+ * the whole request and picking a release out of it client-side would put the
+ * other trips' quantities on a page that must only carry this one's.
+ *
+ * The request is embedded rather than fetched separately so the visibility
+ * check and the printed data come from the same row — a second read could not
+ * disagree today, but it is the kind of gap that only has to open once.
+ */
+export async function getReleaseForReceipt(
+  releaseId: string
+): Promise<ActionResult<DeliveryReceiptData | null>> {
+  try {
+    const ctx = await requireSession()
+
+    const { data, error } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_releases")
+      .select(
+        `
+        *,
+        releaser:user_profiles!released_by(id, full_name),
+        acknowledger:user_profiles!acknowledged_by(id, full_name),
+        resolver:user_profiles!dispute_resolved_by(id, full_name),
+        request_release_items(
+          *,
+          item:items(*, category:categories(id, name), unit:units(id, code, name))
+        ),
+        request:requests!request_id(
+          id, request_no, purpose, fiscal_year,
+          office_id, status, endorsed_at, reviewed_at,
+          office:offices!office_id(id, name, code),
+          requester:user_profiles!requested_by(id, full_name)
+        )
+      `
+      )
+      .eq("id", releaseId)
+      .maybeSingle()
+
+    if (error) return { error: error.message, data: null }
+    if (!data) return { error: "Release not found.", data: null }
+
+    const { request, ...release } = data as unknown as RequestReleaseRow & {
+      request: DeliveryReceiptData["request"] & {
+        office_id: string
+        status: RequestStatus
+        endorsed_at: string | null
+        reviewed_at: string | null
+      }
+    }
+
+    if (!request) return { error: "Release not found.", data: null }
+    if (
+      !canViewRequest(requestVisibility(ctx), {
+        office_id: request.office_id,
+        status: request.status,
+        endorsed_at: request.endorsed_at,
+        reviewed_at: request.reviewed_at,
+      })
+    ) {
+      return { error: REQUEST_NOT_VISIBLE, data: null }
+    }
+
+    return { error: null, data: { release, request } }
+  } catch (e) {
+    return { error: toError(e), data: null }
   }
 }
 

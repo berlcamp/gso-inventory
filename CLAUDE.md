@@ -196,6 +196,39 @@ forever and everyone would learn to ignore it.
 Rolled up per request by `rollUpReceipt` (worst-first: disputed → pending → confirmed →
 waived) for the list column, the dashboard tiles, and the stepper's last step.
 
+### The delivery receipt — the paper half
+
+Every release prints a **Delivery Receipt** at
+`/print/delivery-receipt/[releaseId]`, opened in its own tab from a button on that
+release's card. `getReleaseForReceipt` fetches it.
+
+**Keyed on the release, not the request**, for the same reason `request_releases` exists
+at all: a slip handed over in two trips prints two receipts, each listing only what
+physically went out that time. Printing the request would put quantities on the page that
+nobody in the room can point at. A partial release therefore gets its receipt now and
+another when the rest goes out.
+
+Both signature blocks — **Released By** and **Received By** — are left blank above a rule.
+The sheet exists to collect two wet signatures at the counter; a pre-printed name is a
+claim the paper makes before anyone agreed to it, and the app already holds the digital
+half (`released_by`, and `acknowledge_release`) where it cannot be typed over.
+
+The route lives **outside `/dashboard`** because that layout wraps every page in the
+sidebar and topbar. Hiding app chrome with print rules would still show a receipt sitting
+inside the app on screen — and the screen is what someone checks before hitting print. A
+separate route gets a clean sheet in both media for free. Two consequences follow:
+
+- `src/proxy.ts` guards `/print` alongside `/dashboard`, so a signed-out person gets the
+  login page rather than an error. It is not a second authority: `getReleaseForReceipt`
+  runs the same `canViewRequest` every other read runs, so the release id in the URL
+  grants nothing on its own.
+- `@page` (A4, 14mm/12mm) lives in the component, not `globals.css`. It is a
+  document-level rule, and putting it in the app stylesheet would reformat every Ctrl-P in
+  the app to fit a form only one route is.
+
+`print-color-adjust: exact` is load-bearing — browsers drop backgrounds and lighten
+borders when printing, and a receipt with no rules on it is not a receipt.
+
 ### Postgres functions (all `SECURITY DEFINER`)
 
 Stock never moves through a plain UPDATE — it always goes through an RPC so the balance
@@ -373,7 +406,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, editing before endorsement, endorsing, recommending, approving, rejecting, cancelling, releasing, acknowledging receipt, resolving discrepancies |
+| `requests.ts` | Filing, editing before endorsement, endorsing, recommending, approving, rejecting, cancelling, releasing, printing a delivery receipt, acknowledging receipt, resolving discrepancies |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -688,7 +721,9 @@ already and are not affected by the above.
 
 ### Route Structure
 
-All authenticated routes live under `/dashboard`. The dashboard layout is a **Server
+All authenticated routes live under `/dashboard`, with one deliberate exception:
+`/print/delivery-receipt/[releaseId]`, which is outside it precisely so it gets none of
+this layout — see **The delivery receipt**. The dashboard layout is a **Server
 Component**: it resolves `getSessionSnapshot()` once (redirecting to `/auth/signout` when
 that comes back empty — see **Auth Flow**) and hands it to `SessionProvider`
 (`src/lib/hooks/use-session.tsx`), which backs `useAuth`, `useProfile`, and

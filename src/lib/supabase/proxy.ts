@@ -55,12 +55,18 @@ export async function updateSession(request: NextRequest) {
     return response
   }
 
-  // Redirect unauthenticated users to the login page
-  if (
-    !user &&
-    !request.nextUrl.pathname.startsWith("/auth") &&
-    request.nextUrl.pathname.startsWith("/dashboard")
-  ) {
+  // Redirect unauthenticated users to the login page.
+  //
+  // `/print` is guarded alongside `/dashboard` because it is the same data
+  // behind a different layout — the printable delivery receipt lives outside
+  // `/dashboard` only so it renders as a clean sheet, not because it is any
+  // more public. Its action re-checks visibility server-side regardless; this
+  // just means a signed-out person gets the login page instead of an error.
+  const guarded =
+    request.nextUrl.pathname.startsWith("/dashboard") ||
+    request.nextUrl.pathname.startsWith("/print")
+
+  if (!user && !request.nextUrl.pathname.startsWith("/auth") && guarded) {
     const url = request.nextUrl.clone()
     url.pathname = "/auth"
     return finish(NextResponse.redirect(url))
