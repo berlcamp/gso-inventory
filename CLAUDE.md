@@ -241,6 +241,17 @@ widening of `request.release`: recording an issuance and unrecording one are dif
 and an LGU that wants voids held only by the head should get that by revoking a role
 permission, not by editing an action.
 
+**`quantity_issued - quantity_voided` is what the receiving office signs against**, and
+every place that asks them must use it. Migration 19 taught the ledger, the reports and the
+printed receipt to net voids and missed `acknowledge_release`, which left the office with no
+way to tell the truth: a plain confirm wrote `quantity_received = quantity_issued`, so an
+office handed 7 of 10 after a 3-unit void signed for all 10 — the exact false signature the
+second signature exists to prevent — while typing the correct 7 counted as a mismatch against
+10 and was recorded as `disputed`. Migration 20 moves all three comparisons in the RPC onto
+the net figure, and `netIssued()` in `release-receipts.tsx` is the client mirror the confirm
+and dispute dialogs read. Over-delivery stays uncapped, which now also covers GSO voiding a
+line the office says did arrive.
+
 The printed delivery receipt prints **net** of voids with a boxed notice, because the sheet
 says "Quantity Delivered" above two signature blocks — a reprint carrying the original figure
 would ask two people to sign for goods the system already knows were not issued.
@@ -327,7 +338,7 @@ change, the ledger row, and the status transition commit together.
 | Function | Purpose |
 |---|---|
 | `release_request(request_id, actor_id, lines, received_by, remarks)` | Opens a `request_releases` header, deducts each line from the office balance, writes its release lines and ledger rows, recomputes request status. Rejects releasing more than was approved, more than the balance unless `allow_over_release` is on, and a blank `received_by` — the receiver's name is half of the two-party record. Deletes the header again if no line actually moved, so an empty receipt never lands in anyone's queue. |
-| `acknowledge_release(release_id, actor_id, lines, remarks, dispute)` | The receiving office's counter-signature. Omit `lines` to confirm exactly as issued. Refuses the releaser, another office, a second acknowledgement, a reasonless dispute, and a "dispute" where nothing differs. Writes `received` or `disputed` to `request_logs`. **Moves no stock.** |
+| `acknowledge_release(release_id, actor_id, lines, remarks, dispute)` | The receiving office's counter-signature. Omit `lines` to confirm exactly as issued — which since migration 20 means `quantity_issued - quantity_voided`, the figure all three of its comparisons use. Refuses the releaser, another office, a second acknowledgement, a reasonless dispute, and a "dispute" where nothing differs. Writes `received` or `disputed` to `request_logs`. **Moves no stock.** |
 | `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Opening balance, replenishment, return, or manual correction. Signed quantity; refuses to take either the balance or the baseline negative. `movement_type = 'opening'` moves `opening_quantity` in step with `quantity`; every other type moves the balance alone. |
 | `void_release_item(release_item_id, actor_id, quantity, reason)` | GSO taking back a released line the warehouse never handed over. Restores the balance, raises `quantity_voided`, lowers `quantity_released`, recomputes status, writes a `void` ledger row naming both request and release, and logs `voided`. Refuses a blank reason, a non-positive quantity, and more than the line has left to void. Leaves the `release` row and the office's acknowledgement untouched. |
 | `office_stock_issued(fiscal_year, office_id)` | Total released per office+item, **net of voids**, summed from the ledger as `SUM(-quantity)` over `release` and `void`. Read-only. Takes an explicit office filter because it is `SECURITY DEFINER` — callers without `request.view_all` pass their own office. |
@@ -743,6 +754,7 @@ drops the badge the moment you endorse something and land back on the list.
 17. `..._endorsed_quantities.sql` — `request_items.quantity_endorsed`, and the checker's ceiling moves onto it (`COALESCE(quantity_endorsed, quantity_requested)`, so slips endorsed before this keep working). No backfill: NULL there means "endorsed as filed, before the head could say otherwise", which is the truth about those rows
 18. `..._void_release_enums.sql` — the `void` movement type and the `voided` action. Split from 19 for the reason 8 was split from 7 and 13 from 14: 19 writes both as literals inside a function body
 19. `..._void_release_line.sql` — `request_release_items.quantity_voided` with its ceiling as a CHECK, the `request.void_release` permission and its grants, `void_release_item`, and `office_stock_issued` replaced to net voids off the issued figure. No backfill — a void nobody performed is not a thing. Its closing `SELECT` reports which roles hold the permission and how many people are in them
+20. `..._acknowledge_release_net_of_voids.sql` — replaces `acknowledge_release` so all three of its comparisons read `quantity_issued - quantity_voided`. Fixes 19's miss: a plain confirm made the office sign for voided units, and an accurate count was recorded as a dispute. No backfill — a signature is not something a migration rewrites. Its closing `SELECT` lists any already-signed line a later void has put out of step, to be looked at by hand
 
 ### Types
 

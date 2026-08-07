@@ -80,6 +80,18 @@ import type {
 const qty = (value: number) =>
   Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })
 
+/**
+ * What actually left the warehouse on this line.
+ *
+ * `quantity_issued` is what the custodian wrote down; a void is GSO saying
+ * some of it never went out. **This is the only figure the receiving office
+ * should ever be shown or asked to sign against** — `acknowledge_release`
+ * compares against exactly this, so a dialog using the raw issued quantity
+ * would invite a signature the RPC then reads as a discrepancy.
+ */
+const netIssued = (line: RequestReleaseItemRow) =>
+  Number(line.quantity_issued) - Number(line.quantity_voided ?? 0)
+
 export function ReleaseReceipts({
   releases,
   requestOfficeId,
@@ -247,9 +259,13 @@ function ReleaseCard({
         <TableBody>
           {lines.map((line) => {
             const voided = Number(line.quantity_voided ?? 0)
+            // Flagged against the *net* figure, the same one the RPC judges a
+            // mismatch by. A correct receipt of 7 against 10 issued and 3
+            // voided is not short, and colouring it red would be telling the
+            // office it got the arithmetic wrong when GSO did.
             const short =
               line.quantity_received !== null &&
-              Number(line.quantity_received) !== Number(line.quantity_issued)
+              Number(line.quantity_received) !== netIssued(line)
             const voidable = Number(line.quantity_issued) - voided
 
             return (
@@ -479,22 +495,38 @@ function ConfirmReceiptDialog({
         </DialogHeader>
 
         <div className="max-h-[40vh] space-y-2 overflow-y-auto py-2">
-          {lines.map((line) => (
-            <div
-              key={line.id}
-              className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2"
-            >
-              <p className="min-w-0 truncate text-sm font-medium">
-                {line.item?.name ?? "—"}
-              </p>
-              <p className="shrink-0 text-sm tabular-nums">
-                {qty(line.quantity_issued)}{" "}
-                <span className="text-xs text-muted-foreground">
-                  {line.item?.unit?.code}
-                </span>
-              </p>
-            </div>
-          ))}
+          {lines.map((line) => {
+            const voided = Number(line.quantity_voided ?? 0)
+
+            return (
+              <div
+                key={line.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">
+                    {line.item?.name ?? "—"}
+                  </p>
+                  {/* Say why the number is not the one on the release card.
+                      Without this the office sees a quantity quietly smaller
+                      than the slip's and has no way to tell whether that is
+                      the void or a mistake. */}
+                  {voided > 0 && (
+                    <p className="mt-0.5 text-xs text-amber-700">
+                      {qty(line.quantity_issued)} issued, {qty(voided)} voided
+                      by GSO
+                    </p>
+                  )}
+                </div>
+                <p className="shrink-0 text-sm tabular-nums">
+                  {qty(netIssued(line))}{" "}
+                  <span className="text-xs text-muted-foreground">
+                    {line.item?.unit?.code}
+                  </span>
+                </p>
+              </div>
+            )
+          })}
 
           <div className="space-y-1.5 pt-1">
             <Label
@@ -766,14 +798,16 @@ function DisputeReleaseDialog({
 }) {
   const lines = release.request_release_items ?? []
   const [open, setOpen] = useState(false)
+  // Pre-filled with what actually went out, so the office edits down from the
+  // truth rather than from a figure that includes units GSO already took back.
   const [received, setReceived] = useState<Record<string, number>>(() =>
-    Object.fromEntries(lines.map((l) => [l.id, Number(l.quantity_issued)]))
+    Object.fromEntries(lines.map((l) => [l.id, netIssued(l)]))
   )
   const [remarks, setRemarks] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   const changed = lines.some(
-    (l) => Number(received[l.id] ?? 0) !== Number(l.quantity_issued)
+    (l) => Number(received[l.id] ?? 0) !== netIssued(l)
   )
 
   async function handleDispute() {
@@ -829,7 +863,8 @@ function DisputeReleaseDialog({
         <div className="max-h-[45vh] space-y-3 overflow-y-auto py-4">
           {lines.map((line) => {
             const value = Number(received[line.id] ?? 0)
-            const differs = value !== Number(line.quantity_issued)
+            const voided = Number(line.quantity_voided ?? 0)
+            const differs = value !== netIssued(line)
 
             return (
               <div
@@ -841,8 +876,14 @@ function DisputeReleaseDialog({
                     {line.item?.name ?? "—"}
                   </p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    {qty(line.quantity_issued)} {line.item?.unit?.code} issued
+                    {qty(netIssued(line))} {line.item?.unit?.code} issued
                   </p>
+                  {voided > 0 && (
+                    <p className="text-xs text-amber-700">
+                      {qty(line.quantity_issued)} on the slip, {qty(voided)}{" "}
+                      voided by GSO
+                    </p>
+                  )}
                 </div>
                 <div className="w-24 shrink-0">
                   <Input
