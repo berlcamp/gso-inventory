@@ -13,6 +13,7 @@ export const MOVEMENT_TYPE_OPTIONS = [
   { label: "Replenishment", value: "replenishment" },
   { label: "Return", value: "return" },
   { label: "Adjustment", value: "adjustment" },
+  { label: "Void", value: "void" },
   { label: "Opening", value: "opening" },
 ]
 

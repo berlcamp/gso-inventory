@@ -68,6 +68,29 @@ export const acknowledgeReleaseSchema = z
     path: ["lines"],
   })
 
+/**
+ * Taking back a released line the warehouse never actually handed over.
+ *
+ * The reason is required and has no "optional remarks" fallback, unlike every
+ * other remark field here. A void is the one movement whose justification is
+ * the whole point of it: without one it is indistinguishable from the bare
+ * stock adjustment it exists to replace, and the ledger row it writes is what
+ * an auditor reads years later. The RPC refuses a blank one too — this only
+ * saves the round trip.
+ */
+export const voidReleaseItemSchema = z.object({
+  release_item_id: z.string().uuid(),
+  quantity: z.coerce
+    .number()
+    .positive("Void quantity must be greater than zero.")
+    .max(1_000_000, "Quantity looks too large."),
+  reason: z
+    .string()
+    .trim()
+    .min(5, "Record why this line is being voided.")
+    .max(500),
+})
+
 export const officeSchema = z.object({
   name: z.string().trim().min(3, "Office name is required.").max(200),
   code: z
@@ -149,6 +172,7 @@ export const userUpdateSchema = userFieldsSchema
 export type SupplyRequestFormValues = z.infer<typeof supplyRequestSchema>
 export type RequestUpdateValues = z.infer<typeof requestUpdateSchema>
 export type AcknowledgeReleaseValues = z.infer<typeof acknowledgeReleaseSchema>
+export type VoidReleaseItemValues = z.infer<typeof voidReleaseItemSchema>
 export type OfficeFormValues = z.infer<typeof officeSchema>
 export type ItemFormValues = z.infer<typeof itemSchema>
 export type AdjustStockFormValues = z.infer<typeof adjustStockSchema>

@@ -31,7 +31,20 @@ export interface ReportFilters {
   officeId?: string
 }
 
-/** Movement rows joined with what the report tables need, honouring filters. */
+/**
+ * Movement rows joined with what the report tables need, honouring filters.
+ *
+ * **Voids come back alongside releases**, because an issuance report that
+ * counted goods GSO has since established never left the warehouse would be
+ * reporting a fiction — and it is the report, not the balance, that the LGU
+ * files. The two are stored with opposite signs, so every caller below sums
+ * `-quantity` and the pair nets to zero on a fully voided line. That also means
+ * a row is never *removed* from the ledger to make a total come out right.
+ *
+ * Callers must not use `Math.abs` on these quantities. It was correct while
+ * this only ever returned releases; it now turns every correction back into an
+ * issuance and doubles the error.
+ */
 async function fetchReleases(filters: ReportFilters) {
   const ctx = await requirePermission("reports.view")
 
@@ -39,9 +52,9 @@ async function fetchReleases(filters: ReportFilters) {
     .schema(SCHEMA)
     .from("stock_movements")
     .select(
-      "office_id, item_id, quantity, created_at, request_id, office:offices!office_id(id, name, code), item:items!item_id(id, name, category:categories(name), unit:units(code))"
+      "office_id, item_id, quantity, movement_type, created_at, request_id, office:offices!office_id(id, name, code), item:items!item_id(id, name, category:categories(name), unit:units(code))"
     )
-    .eq("movement_type", "release")
+    .in("movement_type", ["release", "void"])
 
   if (filters.from) query = query.gte("created_at", filters.from)
   if (filters.to) query = query.lte("created_at", `${filters.to}T23:59:59.999Z`)
@@ -56,6 +69,7 @@ async function fetchReleases(filters: ReportFilters) {
       office_id: string
       item_id: string
       quantity: number
+      movement_type: "release" | "void"
       created_at: string
       request_id: string | null
       office: { id: string; name: string; code: string } | null
@@ -85,8 +99,11 @@ export async function getIssuanceByOffice(
         transactions: 0,
         remaining: 0,
       }
-      entry.units_issued += Math.abs(Number(row.quantity))
-      entry.transactions += 1
+      entry.units_issued += -Number(row.quantity)
+      // A void is a correction to an issuance, not a second one. Counting it
+      // would inflate the transaction count in the same breath as it corrects
+      // the units, which is the worst of both.
+      if (row.movement_type === "release") entry.transactions += 1
       totals.set(row.office_id, entry)
     }
 
@@ -134,7 +151,10 @@ export async function getIssuanceByCategory(
     for (const row of rows) {
       const key = row.item?.category?.name ?? "UNCATEGORIZED"
       const entry = totals.get(key) ?? { units: 0, items: new Set<string>() }
-      entry.units += Math.abs(Number(row.quantity))
+      entry.units += -Number(row.quantity)
+      // Counted whichever way the row points: an item whose only movement in
+      // the window is a void of an earlier release still belongs in the
+      // category's item count, and dropping it would hide the correction.
       entry.items.add(row.item_id)
       totals.set(key, entry)
     }
@@ -166,8 +186,15 @@ export async function getMonthlyTrends(
     for (const row of rows) {
       const month = new Date(row.created_at).getMonth() + 1
       const entry = byMonth.get(month) ?? { units: 0, requests: new Set<string>() }
-      entry.units += Math.abs(Number(row.quantity))
-      if (row.request_id) entry.requests.add(row.request_id)
+      entry.units += -Number(row.quantity)
+      // A void lands in the month it was made, not the month of the release it
+      // reverses — so a December issuance corrected in January dips January's
+      // line rather than restating December's. Backdating it would rewrite a
+      // month that has already been reported on, which is the one thing a
+      // correction must not do.
+      if (row.movement_type === "release" && row.request_id) {
+        entry.requests.add(row.request_id)
+      }
       byMonth.set(month, entry)
     }
 
@@ -450,6 +477,12 @@ export async function getConsumptionForForecast(): Promise<
 
     // The ledger, in full. Releases and returns stay separate — how to treat a
     // return is a judgement for whoever reads the file, not one to bake in here.
+    //
+    // Voids are the exception and are netted straight off `units_issued`: a
+    // return is stock that came back after being consumed, which a forecaster
+    // may reasonably want to count as demand, while a void is a line that was
+    // never issued at all. Leaving it in would forecast consumption that never
+    // happened, and no column the reader could add up would fix it.
     const movements = await fetchAllPages<{
       item_id: string
       quantity: number
@@ -461,7 +494,7 @@ export async function getConsumptionForForecast(): Promise<
         .schema(SCHEMA)
         .from("stock_movements")
         .select("item_id, quantity, movement_type, request_id, created_at")
-        .in("movement_type", ["release", "return"])
+        .in("movement_type", ["release", "return", "void"])
         // Primary key again — created_at is not unique enough to page on.
         .order("id")
         .range(from, to)
@@ -486,6 +519,8 @@ export async function getConsumptionForForecast(): Promise<
       if (row.movement_type === "release") {
         bucket.issued += Math.abs(Number(row.quantity))
         if (row.request_id) bucket.requests.add(row.request_id)
+      } else if (row.movement_type === "void") {
+        bucket.issued -= Math.abs(Number(row.quantity))
       } else {
         bucket.returned += Math.abs(Number(row.quantity))
       }

@@ -40,13 +40,35 @@ const RELEASE_NOTIFICATION_SELECT = `
   )
 `
 
+/**
+ * The same four fields again, reached through a ledger row.
+ *
+ * A void has no table of its own — it *is* the `stock_movements` row, which is
+ * the point of the design: the correction, its timestamp, its author and its
+ * reason live in the audit trail rather than in a parallel notifications table
+ * that could disagree with it. `!inner` for the same two reasons as above.
+ */
+const VOID_NOTIFICATION_SELECT = `
+  id, created_at,
+  request:requests!request_id!inner(
+    id, request_no, status, requested_at, office_id,
+    office:offices!office_id(code, name),
+    requester:user_profiles!requested_by(full_name)
+  )
+`
+
 /** Per bucket. The badge still reports the exact total past this. */
 const LIST_LIMIT = 20
 
-/** What `RELEASE_NOTIFICATION_SELECT` comes back as, before flattening. */
+/**
+ * What `RELEASE_NOTIFICATION_SELECT` and `VOID_NOTIFICATION_SELECT` come back
+ * as, before flattening. The two differ only in which column carries the time,
+ * so `at` is read off whichever one the query asked for.
+ */
 interface ReleaseNotificationRow {
   id: string
-  released_at: string | null
+  released_at?: string | null
+  created_at?: string | null
   request: {
     id: string
     request_no: string
@@ -58,11 +80,15 @@ interface ReleaseNotificationRow {
 }
 
 /**
- * Flattens a release row onto the request shape the feed renders.
+ * Flattens a release or ledger row onto the request shape the feed renders.
  *
- * `updated_at` is set to when the goods went out, not when the request last
- * changed: these queues are ordered oldest-first, and what matters is how long
- * a delivery has gone unsigned-for.
+ * `updated_at` is set to when the *event* happened — when the goods went out,
+ * or when the line was voided — not when the request last changed. The
+ * actionable queues are ordered oldest-first and what matters there is how long
+ * a delivery has gone unsigned-for; the news section is newest-first and what
+ * matters is when GSO made the correction. Reading the request's own
+ * `updated_at` would answer neither, since several of these events can share
+ * one request.
  */
 function fromRelease(row: ReleaseNotificationRow): NotificationRequestRow | null {
   if (!row.request) return null
@@ -71,7 +97,7 @@ function fromRelease(row: ReleaseNotificationRow): NotificationRequestRow | null
     request_no: row.request.request_no,
     status: row.request.status,
     requested_at: row.request.requested_at,
-    updated_at: row.released_at,
+    updated_at: row.released_at ?? row.created_at ?? null,
     office: row.request.office,
     requester: row.request.requester,
   }
@@ -223,6 +249,36 @@ export async function getNotifications(): Promise<
       planned.push({
         kind: "confirm",
         query: releaseQueue("pending", ctx.userId),
+        fromReleases: true,
+      })
+    }
+
+    // Voided releases — news for the office the goods were charged to, so its
+    // supply officer and head both learn that something the slip says was
+    // delivered has been taken back off their balance. Without this the only
+    // trace on their side is a status quietly sliding from Released back to
+    // Partially Released, which nobody is watching for.
+    //
+    // Scoped users only, exactly like `confirm`: `scopedOffices` is null for
+    // `request.view_all` holders, and a void is GSO's own action — telling the
+    // desk that performed it about it is not news, it is an echo.
+    //
+    // Keyed on the ledger rather than on `requests`, because the request's
+    // status does not record that a void happened and its `updated_at` cannot
+    // distinguish one from any other edit. `buildFeed` collapses several voided
+    // lines on one slip down to a single entry.
+    if (scopedOffices) {
+      planned.push({
+        kind: "void",
+        query: ctx.supabase
+          .schema(SCHEMA)
+          .from("stock_movements")
+          .select(VOID_NOTIFICATION_SELECT, { count: "exact" })
+          .eq("movement_type", "void")
+          .gte("created_at", cutoff)
+          .in("request.office_id", scopedOffices)
+          .order("created_at", { ascending: false })
+          .limit(LIST_LIMIT),
         fromReleases: true,
       })
     }

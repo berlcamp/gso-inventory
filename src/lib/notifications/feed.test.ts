@@ -129,6 +129,51 @@ describe("buildFeed", () => {
     expect(feed.actionable).toEqual([])
   })
 
+  it("interleaves voids and outcomes into one chronological Recent list", () => {
+    const feed = buildFeed([
+      source("void", [
+        row({ id: "void-old", status: "partially_released", updated_at: "2026-07-28T00:00:00.000Z" }),
+        row({ id: "void-new", status: "approved", updated_at: "2026-08-05T00:00:00.000Z" }),
+      ]),
+      source("outcome", [
+        row({ id: "out-mid", status: "released", updated_at: "2026-08-02T00:00:00.000Z" }),
+      ]),
+    ])
+
+    // Sorted across both buckets, not bucket-by-bucket.
+    expect(feed.recent.map((i) => i.id)).toEqual([
+      "void-new",
+      "out-mid",
+      "void-old",
+    ])
+    // News never lights the badge, whichever bucket it came from.
+    expect(feed.count).toBe(0)
+  })
+
+  it("keeps the void headline when a slip is both voided and a recent outcome", () => {
+    // The common case: GSO voids a line an hour after releasing the slip, so
+    // the same request is in both news buckets. "Released" is the less useful
+    // of the two things to tell the office.
+    const shared = row({ id: "shared", status: "released" })
+    const feed = buildFeed([
+      source("outcome", [shared]),
+      source("void", [shared]),
+    ])
+
+    expect(feed.recent).toHaveLength(1)
+    expect(feed.recent[0].kind).toBe("void")
+  })
+
+  it("collapses several voided lines on one request to a single entry", () => {
+    // `void` is keyed on ledger rows, so voiding three lines of one slip
+    // fetches three rows naming the same request.
+    const slip = row({ id: "same-slip", status: "partially_released" })
+    const feed = buildFeed([source("void", [slip, slip, slip], 3)])
+
+    expect(feed.recent).toHaveLength(1)
+    expect(feed.count).toBe(0)
+  })
+
   it("does not repeat a request in Recent that is already actionable", () => {
     const shared = row({ id: "shared", status: "approved" })
     const feed = buildFeed([

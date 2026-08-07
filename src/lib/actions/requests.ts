@@ -12,6 +12,7 @@ import {
   acknowledgeReleaseSchema,
   requestUpdateSchema,
   supplyRequestSchema,
+  voidReleaseItemSchema,
 } from "@/lib/schemas/gso"
 import { getSystemSettings } from "@/lib/actions/settings"
 import {
@@ -1746,6 +1747,78 @@ export async function resolveReleaseDispute(
     revalidatePath("/dashboard/requests")
     revalidatePath("/dashboard")
     return { error: null, data: null }
+  } catch (e) {
+    return { error: toError(e), data: null }
+  }
+}
+
+/**
+ * Take back a released line the warehouse never actually handed over.
+ *
+ * The case this exists for: GSO approves a slip, the custodian records the
+ * release, the office signs for it — and one of the items turns out not to have
+ * been on the shelf. Nothing about the request was wrong; the claim that it was
+ * issued was. Before this the only remedy was a bare `adjust_stock`, which put
+ * the balance right and left the issuance reports counting goods that never
+ * moved, the slip reading `released`, and the correction tied to the request by
+ * nothing but a line of free text.
+ *
+ * Everything that makes it a correction rather than an erasure lives in
+ * `void_release_item`, in one transaction: the balance goes back to the office
+ * it was drawn from, `quantity_released` comes down so the slip is releasable
+ * again when the stock arrives, a `void` ledger row is written carrying both
+ * the request and the release, and a `voided` entry lands on the timeline. The
+ * original `release` row and the office's acknowledgement are left exactly as
+ * written — what the office signed is what it believed at the time.
+ *
+ * `request.void_release` rather than `request.release`: recording an issuance
+ * and unrecording one are different powers, and an LGU that wants the second
+ * one held only by the GSO head should get that by revoking a role permission
+ * rather than by anyone editing this file.
+ */
+export async function voidReleaseItem(
+  input: unknown
+): Promise<ActionResult<{ status: string } | null>> {
+  try {
+    const ctx = await requirePermission("request.void_release")
+    const parsed = voidReleaseItemSchema.safeParse(input)
+    if (!parsed.success) {
+      return { error: parsed.error.issues[0].message, data: null }
+    }
+    const values = parsed.data
+
+    // Only to revalidate the right page afterwards. The RPC resolves the
+    // release line, the request and the office on its own, so a wrong id here
+    // fails there rather than reaching anything it should not.
+    const { data: line } = await ctx.supabase
+      .schema(SCHEMA)
+      .from("request_release_items")
+      .select("release:request_releases!release_id(request_id)")
+      .eq("id", values.release_item_id)
+      .maybeSingle()
+
+    const requestId = (
+      line as { release?: { request_id?: string } | null } | null
+    )?.release?.request_id
+
+    const { data, error } = await ctx.supabase
+      .schema(SCHEMA)
+      .rpc("void_release_item", {
+        p_release_item_id: values.release_item_id,
+        p_actor_id: ctx.userId,
+        p_quantity: values.quantity,
+        p_reason: values.reason,
+      })
+
+    if (error) return { error: error.message, data: null }
+
+    if (requestId) revalidatePath(`/dashboard/requests/${requestId}`)
+    revalidatePath("/dashboard/requests")
+    revalidatePath("/dashboard/inventory")
+    revalidatePath("/dashboard/movements")
+    revalidatePath("/dashboard/reports")
+    revalidatePath("/dashboard")
+    return { error: null, data: { status: data as string } }
   } catch (e) {
     return { error: toError(e), data: null }
   }

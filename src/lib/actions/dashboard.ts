@@ -148,7 +148,10 @@ export async function getDashboardStats(): Promise<
       .schema(SCHEMA)
       .from("stock_movements")
       .select("quantity")
-      .eq("movement_type", "release")
+      // Voids are stored positive against the release's negative, so pulling
+      // both and summing the signed quantity nets them off. The tile has to
+      // agree with the issuance report, and the report nets.
+      .in("movement_type", ["release", "void"])
       .gte("created_at", monthStart)
 
     let lowStockQuery = ctx.supabase
@@ -203,8 +206,10 @@ export async function getDashboardStats(): Promise<
       lowStockQuery,
     ])
 
+    // Signed, not absolute: `Math.abs` would turn each void back into an
+    // issuance and overstate the month by twice the correction.
     const unitsIssued = ((issuedMonth.data ?? []) as { quantity: number }[]).reduce(
-      (sum, m) => sum + Math.abs(Number(m.quantity)),
+      (sum, m) => sum - Number(m.quantity),
       0
     )
 
@@ -329,7 +334,7 @@ export async function getTopIssuedItems(
       .schema(SCHEMA)
       .from("stock_movements")
       .select("item_id, quantity, item:items!item_id(id, name, unit:units(code))")
-      .eq("movement_type", "release")
+      .in("movement_type", ["release", "void"])
       .gte("created_at", since)
 
     if (!ctx.canViewAll) {
@@ -353,13 +358,17 @@ export async function getTopIssuedItems(
         unit: row.item?.unit?.code ?? "",
         quantity: 0,
       }
-      current.quantity += Math.abs(Number(row.quantity))
+      current.quantity -= Number(row.quantity)
       totals.set(key, current)
     }
 
     return {
       error: null,
       data: [...totals.values()]
+        // An item whose only movement in the window was a void of an earlier
+        // release nets to zero or below. It was not issued, so it does not
+        // belong in a list of what was issued most.
+        .filter((item) => item.quantity > 0)
         .sort((a, b) => b.quantity - a.quantity)
         .slice(0, limit),
     }

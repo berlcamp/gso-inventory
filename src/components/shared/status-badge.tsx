@@ -137,6 +137,13 @@ const movementConfig: Record<
     label: "Adjustment",
     className: "bg-violet-50 text-violet-700 ring-1 ring-violet-200",
   },
+  // Amber rather than green: the balance goes up, but this is a correction to
+  // a record that was wrong, not stock arriving. A reader scanning the ledger
+  // should be able to tell those two apart at a glance.
+  void: {
+    label: "Void",
+    className: "bg-amber-50 text-amber-800 ring-1 ring-amber-300",
+  },
 }
 
 export function MovementBadge({ type }: { type: MovementType }) {

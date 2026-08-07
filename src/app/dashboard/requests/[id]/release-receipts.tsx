@@ -12,6 +12,12 @@
  * and flags the release for GSO, who reconciles the balance with a stock
  * adjustment — so the ledger keeps exactly one author and a shortfall shows up
  * as a visible correction instead of a department editing inventory.
+ *
+ * **Voiding is the other direction and does move stock**, because it is GSO
+ * correcting GSO: a line recorded as issued that never left the warehouse. It
+ * restores the balance, reopens the slip for that quantity, and writes both a
+ * ledger row and a timeline entry. The issued figure stays on screen beside the
+ * voided one — a void is a correction on the record, not a redraft of it.
  */
 
 import { useState } from "react"
@@ -54,6 +60,7 @@ import {
   Info,
   Loader2,
   Printer,
+  RotateCcw,
   TriangleAlert,
   Wrench,
 } from "lucide-react"
@@ -62,9 +69,13 @@ import { usePermissions } from "@/lib/hooks/use-permissions"
 import {
   acknowledgeRelease,
   resolveReleaseDispute,
+  voidReleaseItem,
 } from "@/lib/actions/requests"
 import { releaseAckEligibility, type ReceiptViewer } from "@/lib/requests/receipt"
-import type { RequestReleaseRow } from "@/types/database"
+import type {
+  RequestReleaseItemRow,
+  RequestReleaseRow,
+} from "@/types/database"
 
 const qty = (value: number) =>
   Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })
@@ -120,6 +131,11 @@ export function ReleaseReceipts({
             // Settling a discrepancy is GSO's job — the same desk that issued
             // the goods and that will make any corrective stock adjustment.
             canResolve={can("request.release")}
+            // Its own permission, not `request.release`: recording an issuance
+            // and unrecording one are different powers, and an LGU that wants
+            // voids held only by the GSO head revokes a role permission rather
+            // than changing this file.
+            canVoid={can("request.void_release")}
             onError={setError}
           />
         ))}
@@ -135,6 +151,7 @@ function ReleaseCard({
   requestOfficeId,
   viewer,
   canResolve,
+  canVoid,
   onError,
 }: {
   release: RequestReleaseRow
@@ -143,6 +160,7 @@ function ReleaseCard({
   requestOfficeId: string
   viewer: ReceiptViewer
   canResolve: boolean
+  canVoid: boolean
   onError: (message: string | null) => void
 }) {
   const router = useRouter()
@@ -150,6 +168,10 @@ function ReleaseCard({
   const eligibility = releaseAckEligibility(release, requestOfficeId, viewer)
   const isAcknowledged =
     release.ack_status === "confirmed" || release.ack_status === "disputed"
+
+  // The column only appears once there is something in it. A void is rare, and
+  // an always-present empty column would imply otherwise on every receipt.
+  const anyVoided = lines.some((line) => Number(line.quantity_voided ?? 0) > 0)
 
   return (
     <div className="rounded-xl border border-border/60">
@@ -211,16 +233,24 @@ function ReleaseCard({
             <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Issued
             </TableHead>
+            {anyVoided && (
+              <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Voided
+              </TableHead>
+            )}
             <TableHead className="text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Received
             </TableHead>
+            {canVoid && <TableHead className="w-10" />}
           </TableRow>
         </TableHeader>
         <TableBody>
           {lines.map((line) => {
+            const voided = Number(line.quantity_voided ?? 0)
             const short =
               line.quantity_received !== null &&
               Number(line.quantity_received) !== Number(line.quantity_issued)
+            const voidable = Number(line.quantity_issued) - voided
 
             return (
               <TableRow key={line.id} className="border-border/40">
@@ -230,9 +260,29 @@ function ReleaseCard({
                 <TableCell className="hidden text-sm text-muted-foreground sm:table-cell">
                   {line.item?.unit?.code ?? "—"}
                 </TableCell>
-                <TableCell className="text-right tabular-nums">
+                {/* The custodian's original figure, never rewritten. A void
+                    sits beside it so the record can still say a mistake was
+                    made; overwriting this would erase that. */}
+                <TableCell
+                  className={
+                    voidable <= 0
+                      ? "text-right tabular-nums text-muted-foreground line-through"
+                      : "text-right tabular-nums"
+                  }
+                >
                   {qty(line.quantity_issued)}
                 </TableCell>
+                {anyVoided && (
+                  <TableCell className="text-right tabular-nums">
+                    {voided > 0 ? (
+                      <span className="font-semibold text-amber-700">
+                        −{qty(voided)}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                )}
                 <TableCell
                   className={
                     short
@@ -244,11 +294,37 @@ function ReleaseCard({
                     ? "—"
                     : qty(line.quantity_received)}
                 </TableCell>
+                {canVoid && (
+                  <TableCell className="text-right">
+                    {voidable > 0 && (
+                      <VoidLineDialog
+                        line={line}
+                        voidable={voidable}
+                        onDone={() => {
+                          onError(null)
+                          router.refresh()
+                        }}
+                        onError={onError}
+                      />
+                    )}
+                  </TableCell>
+                )}
               </TableRow>
             )
           })}
         </TableBody>
       </Table>
+
+      {anyVoided && (
+        <div className="border-t border-border/50 bg-amber-50/40 px-4 py-2">
+          <p className="flex items-start gap-1.5 text-xs text-amber-900">
+            <RotateCcw className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            Voided quantities were returned to the office&rsquo;s balance and
+            are outstanding on this request again. See the timeline and the
+            stock ledger for who voided them and why.
+          </p>
+        </div>
+      )}
 
       <div className="border-t border-border/50 px-4 py-3">
         {isAcknowledged ? (
@@ -519,6 +595,157 @@ function ResolveDisputeDialog({
           <Button onClick={handleResolve} disabled={submitting}>
             {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Record Resolution
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* ── Void ──────────────────────────────────────────────────────────────── */
+
+/**
+ * GSO taking back a line it recorded as issued — the item was on the slip and
+ * on the receipt, but not on the shelf.
+ *
+ * Unlike a dispute, this **moves stock**: the quantity goes back to the
+ * office's balance and becomes outstanding on the request again. That is the
+ * whole reason it is GSO's action and not the receiving office's — the ledger
+ * keeps exactly one author.
+ *
+ * Defaults to the entire outstanding quantity, because the common case is an
+ * item that was not there at all. A partial void is for the trip that promised
+ * fifty and handed over thirty.
+ */
+function VoidLineDialog({
+  line,
+  voidable,
+  onDone,
+  onError,
+}: {
+  line: RequestReleaseItemRow
+  voidable: number
+  onDone: () => void
+  onError: (message: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [quantity, setQuantity] = useState(voidable)
+  const [reason, setReason] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleVoid() {
+    setSubmitting(true)
+    const result = await voidReleaseItem({
+      release_item_id: line.id,
+      quantity,
+      reason: reason.trim(),
+    })
+    setSubmitting(false)
+
+    if (result.error) {
+      onError(result.error)
+      return
+    }
+    toast.success("Released line voided. The quantity is back on the balance.")
+    setOpen(false)
+    setReason("")
+    onDone()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
+            aria-label={`Void ${line.item?.name ?? "this line"}`}
+          />
+        }
+      >
+        <RotateCcw className="h-3.5 w-3.5" />
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>Void Released Line</DialogTitle>
+          <DialogDescription>
+            Use this when the goods were recorded as issued but never physically
+            left the warehouse. The quantity goes back to the office&rsquo;s
+            balance and becomes outstanding on this request again.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-2">
+          <div className="rounded-lg border border-border/60 px-3 py-2">
+            <p className="text-sm font-medium">{line.item?.name ?? "—"}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {qty(line.quantity_issued)} {line.item?.unit?.code} issued on this
+              release
+              {Number(line.quantity_voided ?? 0) > 0 && (
+                <> · {qty(Number(line.quantity_voided))} already voided</>
+              )}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label
+              htmlFor={`void-qty-${line.id}`}
+              className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+            >
+              Quantity to void
+            </Label>
+            <Input
+              id={`void-qty-${line.id}`}
+              type="number"
+              min={0}
+              max={voidable}
+              step="any"
+              value={quantity}
+              onChange={(e) => setQuantity(Number(e.target.value))}
+              className="text-right tabular-nums"
+            />
+            <p className="text-xs text-muted-foreground">
+              Up to {qty(voidable)} {line.item?.unit?.code}.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label
+              htmlFor={`void-reason-${line.id}`}
+              className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+            >
+              Why is this being voided?
+            </Label>
+            <Textarea
+              id={`void-reason-${line.id}`}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Required — e.g. item was not in the warehouse and was never handed over"
+              rows={3}
+            />
+            {/* The reason is the difference between this and a bare stock
+                adjustment. It goes onto both the ledger row and the request's
+                timeline, and it is what an auditor reads years from now. */}
+            <p className="text-xs text-muted-foreground">
+              Recorded on the stock ledger and on this request&rsquo;s timeline.
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="destructive"
+            onClick={handleVoid}
+            disabled={
+              submitting ||
+              reason.trim().length < 5 ||
+              quantity <= 0 ||
+              quantity > voidable
+            }
+          >
+            {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            Void Line
           </Button>
         </DialogFooter>
       </DialogContent>

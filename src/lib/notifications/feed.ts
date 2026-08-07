@@ -31,6 +31,8 @@ export type NotificationKind =
   | "confirm"
   /** Approved — *you* filed it, so it is yours to go and collect. */
   | "pickup"
+  /** GSO took back a line it had recorded as issued to your office. */
+  | "void"
   /** Finished: rejected or released. News, not a task. */
   | "outcome"
 
@@ -52,6 +54,21 @@ export const ACTIONABLE_KINDS = [
   "release",
   "confirm",
   "pickup",
+] as const satisfies readonly NotificationKind[]
+
+/**
+ * News kinds, most specific first. These fill the panel's "Recent" section and
+ * deliberately do **not** light the badge: nothing but time clears them, so
+ * counting them would leave every user with a number that never reaches zero
+ * and therefore means nothing.
+ *
+ * `void` outranks `outcome` because it says more. A slip whose released line
+ * was taken back is very likely also in `outcome` — it was `released` an hour
+ * ago — and "Released" is the less useful of the two things to be told.
+ */
+export const NEWS_KINDS = [
+  "void",
+  "outcome",
 ] as const satisfies readonly NotificationKind[]
 
 /** The columns the action selects. Kept narrow — the bell shows four fields. */
@@ -106,6 +123,7 @@ const KIND_HEADLINE: Record<Exclude<NotificationKind, "outcome">, string> = {
   release: "Ready to release",
   confirm: "Confirm what your office received",
   pickup: "Approved — ready for pickup at GSO",
+  void: "GSO voided a released item — it was not issued",
 }
 
 const OUTCOME_HEADLINE: Partial<Record<RequestStatus, string>> = {
@@ -121,6 +139,7 @@ export const SECTION_LABEL: Record<NotificationKind, string> = {
   release: "For release",
   confirm: "For receipt confirmation",
   pickup: "Ready for pickup",
+  void: "Voided releases",
   outcome: "Recent",
 }
 
@@ -209,11 +228,29 @@ export function buildFeed(sources: NotificationSource[]): NotificationFeed {
     count += Math.max(0, source.total - (source.rows.length - fresh.length))
   }
 
-  const recent = (byKind.get("outcome")?.rows ?? [])
-    .filter((row) => !seen.has(row.id))
-    .slice()
-    .sort((a, b) => compareAt(a, b, -1))
-    .map((row) => toItem(row, "outcome"))
+  // News is merged across every news kind and then sorted as one list, so the
+  // panel reads chronologically rather than in bucket order.
+  //
+  // Deduped in `NEWS_KINDS` order and *before* the sort, which is what makes
+  // that order the tie-break: a request that is both freshly voided and
+  // freshly released keeps the void. `void` is also keyed on ledger rows
+  // rather than on requests, so several voided lines on one slip arrive as
+  // several rows — this collapses them to one entry, since the panel links to
+  // the request either way.
+  const newsSeen = new Set<string>()
+  const news: { row: NotificationRequestRow; kind: NotificationKind }[] = []
+
+  for (const kind of NEWS_KINDS) {
+    for (const row of byKind.get(kind)?.rows ?? []) {
+      if (seen.has(row.id) || newsSeen.has(row.id)) continue
+      newsSeen.add(row.id)
+      news.push({ row, kind })
+    }
+  }
+
+  const recent = news
+    .sort((a, b) => compareAt(a.row, b.row, -1))
+    .map(({ row, kind }) => toItem(row, kind))
 
   return { actionable, recent, count, truncated: count > actionable.length }
 }

@@ -45,6 +45,12 @@ export type MovementType =
   | "replenishment"
   | "return"
   | "adjustment"
+  /**
+   * A release taken back because the goods never physically left the
+   * warehouse. Stored positive, against the release's negative, so the two net
+   * to zero in `office_stock_issued` without either row being edited.
+   */
+  | "void"
 
 export type RequestAction =
   | "submitted"
@@ -60,6 +66,8 @@ export type RequestAction =
   | "disputed"
   /** GSO answered a reported discrepancy. */
   | "resolved"
+  /** GSO took back a released line the warehouse never actually handed over. */
+  | "voided"
   | "cancelled"
   | "updated"
 
@@ -250,6 +258,13 @@ export interface RequestReleaseItem {
   quantity_issued: number
   /** What the office says arrived. NULL until someone acknowledges. */
   quantity_received: number | null
+  /**
+   * How much of `quantity_issued` GSO has since taken back because it never
+   * physically left the warehouse. Cumulative, and never more than was issued.
+   * `quantity_issued` itself is left alone — it is what the custodian recorded
+   * at the time, and a void is a correction on top of it, not an erasure.
+   */
+  quantity_voided: number
 }
 
 export interface StockMovement {
