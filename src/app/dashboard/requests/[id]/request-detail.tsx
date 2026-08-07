@@ -175,12 +175,13 @@ export function RequestDetail({
                   onError={setError}
                 />
               )}
+              {/* No `onError`: this dialog reports its own failures inside
+                  itself, since it stays open when one happens. */}
               {isReleasable && can("request.release") && (
                 <ReleaseDialog
                   request={request}
                   availability={availability}
                   onDone={() => router.refresh()}
-                  onError={setError}
                 />
               )}
               {isEditable && (
@@ -964,16 +965,23 @@ function RejectDialog({
 
 /* ── Release ───────────────────────────────────────────────────────────── */
 
+/**
+ * Errors land **inside the dialog**, not in the page-level alert.
+ *
+ * Every failure here leaves the modal open — a blank receiver's name or a
+ * quantity the RPC refused is something to fix and retry, not to start over. A
+ * message rendered on the page behind an open modal is one nobody reads: the
+ * button appears to do nothing, and the actual explanation is under the
+ * overlay.
+ */
 function ReleaseDialog({
   request,
   availability,
   onDone,
-  onError,
 }: {
   request: SupplyRequestRow
   availability: Record<string, ItemAvailability>
   onDone: () => void
-  onError: (message: string) => void
 }) {
   const lines = (request.request_items ?? []).filter((l) => {
     const approved = Number(l.quantity_approved ?? l.quantity_requested)
@@ -996,8 +1004,15 @@ function ReleaseDialog({
   const [certified, setCertified] = useState(false)
   const [remarks, setRemarks] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Which field to outline, so the message and the box that caused it point at
+  // the same thing. A server error names no field and leaves this false.
+  const [receiverInvalid, setReceiverInvalid] = useState(false)
 
   async function handleRelease() {
+    setError(null)
+    setReceiverInvalid(false)
+
     const payload = lines
       .map((l) => ({
         request_item_id: l.id,
@@ -1006,14 +1021,15 @@ function ReleaseDialog({
       .filter((l) => l.quantity > 0)
 
     if (payload.length === 0) {
-      onError("Enter at least one quantity to release.")
+      setError("Enter at least one quantity to release.")
       return
     }
     // Naming the receiver is half of the two-party record — the receiving
     // office's confirmation has to have someone to point at. The RPC refuses a
     // blank one too; this only spares a round trip.
     if (!receivedBy.trim()) {
-      onError("Name the person collecting the supplies.")
+      setError("Name the person collecting the supplies.")
+      setReceiverInvalid(true)
       return
     }
 
@@ -1027,7 +1043,7 @@ function ReleaseDialog({
     setSubmitting(false)
 
     if (result.error) {
-      onError(result.error)
+      setError(result.error)
       return
     }
 
@@ -1041,7 +1057,18 @@ function ReleaseDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        // Reopening starts clean — a stale message from the last attempt would
+        // read as a fresh rejection of a form nobody has submitted yet.
+        if (!next) {
+          setError(null)
+          setReceiverInvalid(false)
+        }
+      }}
+    >
       <DialogTrigger render={<Button size="sm" />}>
         <PackageCheck className="h-3.5 w-3.5" />
         Record Release
@@ -1054,6 +1081,15 @@ function ReleaseDialog({
             entry. Release less than approved to record a partial issuance.
           </DialogDescription>
         </DialogHeader>
+
+        {/* Above the scroll area, so it is on screen whatever the item list is
+            scrolled to — the offending field can be several rows down. */}
+        {error && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
         <div className="max-h-[45vh] space-y-3 overflow-y-auto py-4">
           {lines.map((line) => {
@@ -1114,8 +1150,19 @@ function ReleaseDialog({
             <Input
               id="received-by"
               value={receivedBy}
-              onChange={(e) => setReceivedBy(e.target.value)}
+              onChange={(e) => {
+                setReceivedBy(e.target.value)
+                // Clear the moment they start fixing it. Leaving the message up
+                // while the field is being filled in makes it look like typing
+                // is not working.
+                if (receiverInvalid) {
+                  setReceiverInvalid(false)
+                  setError(null)
+                }
+              }}
+              aria-invalid={receiverInvalid}
               placeholder="Name of the person collecting the supplies"
+              className={receiverInvalid ? "border-destructive" : ""}
             />
             <p className="text-xs text-muted-foreground">
               Their office confirms this delivery separately — someone other
