@@ -61,6 +61,16 @@ and the stock-balance report cannot disagree. Returns are **not** netted off —
 keeps releases and returns in separate columns on the grounds that how to treat a return is
 the reader's judgement.
 
+**`void` movements are the one thing that *is* netted off** (migration 19). A return is
+stock that came back after being issued, and whether that counts as consumption is a
+judgement; a void is a line that was never issued at all, so leaving it in the issued
+figure is not a judgement but an error. Releases are stored negative and voids positive,
+so every issuance figure in the app is `SUM(-quantity)` over the pair — `office_stock_issued`
+in SQL, `fetchReleases`' three callers, the dashboard's units-issued tile and top-items
+list. **Never `Math.abs` a quantity from those queries**: it was correct while they only
+returned releases, and it now turns each correction back into an issuance and doubles the
+error.
+
 Baselines for items added after the spreadsheet load come from the `opening` movement type
 in `adjust_stock` (admin → inventory → Adjust Stock → "Opening balance"), which is the only
 path that writes `opening_quantity`. The enum had `opening` from migration 1 but nothing
@@ -196,11 +206,63 @@ forever and everyone would learn to ignore it.
 Rolled up per request by `rollUpReceipt` (worst-first: disputed → pending → confirmed →
 waived) for the list column, the dashboard tiles, and the stepper's last step.
 
-### The delivery receipt — the paper half
+### Voiding a released line — GSO correcting GSO
 
-Every release prints a **Delivery Receipt** at
-`/print/delivery-receipt/[releaseId]`, opened in its own tab from a button on that
-release's card. `getReleaseForReceipt` fetches it.
+The case: a slip is approved, the custodian records the release, the office signs for it —
+and one of the items was never on the shelf. A dispute cannot answer it (the release is
+already acknowledged, and `acknowledge_release` refuses a second signature), and `adjust_stock`
+answered it badly on three counts. Its ledger row carries no `request_id` and no `release_id`,
+so the only thing tying the correction to the slip was free text in `remarks`. Nothing landed
+on the request's timeline, so the slip read `released` forever while the ledger disagreed.
+And `office_stock_issued` counted only `movement_type = 'release'`, so **the balance was right
+and every issuance report was wrong** — which is the half the LGU files.
+
+`void_release_item(release_item_id, actor_id, quantity, reason)` is the same event recorded
+properly, in one transaction: balance restored to the office it was drawn from,
+`request_release_items.quantity_voided` raised, `request_items.quantity_released` lowered,
+request status recomputed, a `void` ledger row written carrying **both** the request and the
+release, and a `voided` entry logged on the timeline.
+
+- **A void is not a deletion.** The `release` row stays exactly as written, and so does the
+  office's acknowledgement — including `quantity_received`. What the office signed is what it
+  believed at the time; the void is the correction on top. Erase either half and the record
+  can no longer say a mistake was made.
+- **A void reopens the slip.** `quantity_released` comes back down, so the request drops out
+  of `released` and the quantity is releasable again when the stock actually arrives. Nothing
+  about the approval was wrong — only the claim that it had been handed over.
+- **Cumulative, not a flag.** A trip that issued 50 and delivered 30 is voided by 20 and is
+  still a real release of 30. The CHECK `quantity_voided <= quantity_issued` is what stops a
+  second void taking back more than ever went out.
+- **The reason is mandatory**, in the schema and again in the RPC. Without one this is
+  indistinguishable from the bare adjustment it replaces.
+
+`request.void_release` is its own permission (admin, GSO head, GSO custodian) rather than a
+widening of `request.release`: recording an issuance and unrecording one are different powers,
+and an LGU that wants voids held only by the head should get that by revoking a role
+permission, not by editing an action.
+
+The printed delivery receipt prints **net** of voids with a boxed notice, because the sheet
+says "Quantity Delivered" above two signature blocks — a reprint carrying the original figure
+would ask two people to sign for goods the system already knows were not issued.
+
+### The printed forms — the paper half
+
+Two routes print, both outside `/dashboard`, both opened in their own tab from a button:
+
+| Route | Sheet | Keyed on | Fetched by | Signatories |
+|---|---|---|---|---|
+| `/print/delivery-receipt/[releaseId]` | Delivery Receipt | a **release** | `getReleaseForReceipt` | Released By + Received By |
+| `/print/items-checklist/[id]` | Items Checklist | a **request** | `getRequest` | Checked By |
+
+**Everything above the table is shared** — `src/components/print/sheet.tsx` exports
+`PrintSheet` (letterhead, seals, `@page` rules, auto-print, the on-screen Print button)
+plus `MetaRow`, `Th`, `Td`, `SignatureBlock` and `qty`. That is not only deduplication:
+these are LGU forms, and a letterhead that drifted between the two would stop them reading
+as documents from the same office — which nobody notices until a stack is already signed.
+
+### The delivery receipt
+
+Every release prints a **Delivery Receipt**, opened from a button on that release's card.
 
 **Keyed on the release, not the request**, for the same reason `request_releases` exists
 at all: a slip handed over in two trips prints two receipts, each listing only what
@@ -229,6 +291,34 @@ separate route gets a clean sheet in both media for free. Two consequences follo
 `print-color-adjust: exact` is load-bearing — browsers drop backgrounds and lighten
 borders when printing, and a receipt with no rules on it is not a receipt.
 
+### The items checklist
+
+The sheet GSO walks the warehouse with, printed from a button on the request detail page's
+**Requested Items** card.
+
+**Keyed on the request, not a release** — the exact opposite of the receipt, and for the
+same underlying reason. A receipt records a trip that already happened; a checklist is the
+instruction for one nobody has made yet, so there is no release to key it on.
+
+**It appears from `pending` on** — i.e. once the office's own head has endorsed, which is
+the moment GSO first has any business with the slip at all. `awaiting_endorsement` is the
+department's internal draft and GSO cannot even see it; `rejected` and `cancelled` are left
+out because a checklist for a dead slip sends someone to the shelves for nothing. The page
+re-checks the status itself, since the button is not the URL.
+
+**The quantity printed is the operative one at the current stage** —
+`quantity_approved ?? quantity_recommended ?? quantity_endorsed ?? quantity_requested` —
+and the stage is named in a line under the table. Printing `quantity_requested` throughout
+would send a picker after stock the checker already cut. The label is derived from
+`requests.status` rather than from whichever column is non-null, so every row on one sheet
+is attributed to the same desk.
+
+**One blank column, one signatory.** "Qty. Checked" is left empty because it is the column
+the sheet exists for — a pre-filled count is the picker agreeing with the system before
+looking at the shelf. Nothing here is a two-party record: it is GSO checking GSO's own
+stock, so **Checked By** is the whole of it, and the two wet signatures come later on the
+receipt.
+
 ### Postgres functions (all `SECURITY DEFINER`)
 
 Stock never moves through a plain UPDATE — it always goes through an RPC so the balance
@@ -239,7 +329,8 @@ change, the ledger row, and the status transition commit together.
 | `release_request(request_id, actor_id, lines, received_by, remarks)` | Opens a `request_releases` header, deducts each line from the office balance, writes its release lines and ledger rows, recomputes request status. Rejects releasing more than was approved, more than the balance unless `allow_over_release` is on, and a blank `received_by` — the receiver's name is half of the two-party record. Deletes the header again if no line actually moved, so an empty receipt never lands in anyone's queue. |
 | `acknowledge_release(release_id, actor_id, lines, remarks, dispute)` | The receiving office's counter-signature. Omit `lines` to confirm exactly as issued. Refuses the releaser, another office, a second acknowledgement, a reasonless dispute, and a "dispute" where nothing differs. Writes `received` or `disputed` to `request_logs`. **Moves no stock.** |
 | `adjust_stock(office_id, item_id, quantity, movement_type, actor_id, remarks)` | Opening balance, replenishment, return, or manual correction. Signed quantity; refuses to take either the balance or the baseline negative. `movement_type = 'opening'` moves `opening_quantity` in step with `quantity`; every other type moves the balance alone. |
-| `office_stock_issued(fiscal_year, office_id)` | Total released per office+item, summed from the ledger. Read-only. Takes an explicit office filter because it is `SECURITY DEFINER` — callers without `request.view_all` pass their own office. |
+| `void_release_item(release_item_id, actor_id, quantity, reason)` | GSO taking back a released line the warehouse never handed over. Restores the balance, raises `quantity_voided`, lowers `quantity_released`, recomputes status, writes a `void` ledger row naming both request and release, and logs `voided`. Refuses a blank reason, a non-positive quantity, and more than the line has left to void. Leaves the `release` row and the office's acknowledgement untouched. |
+| `office_stock_issued(fiscal_year, office_id)` | Total released per office+item, **net of voids**, summed from the ledger as `SUM(-quantity)` over `release` and `void`. Read-only. Takes an explicit office filter because it is `SECURITY DEFINER` — callers without `request.view_all` pass their own office. |
 
 ### Balance enforcement
 
@@ -406,7 +497,7 @@ All reads and mutations are **Server Actions** in `src/lib/actions/`:
 
 | File | Covers |
 |---|---|
-| `requests.ts` | Filing, editing before endorsement, endorsing, recommending, approving, rejecting, cancelling, releasing, printing a delivery receipt, acknowledging receipt, resolving discrepancies |
+| `requests.ts` | Filing, editing before endorsement, endorsing, recommending, approving, rejecting, cancelling, releasing, printing a delivery receipt, acknowledging receipt, resolving discrepancies, voiding a released line |
 | `inventory.ts` | Office balances, stock ledger, adjustments |
 | `catalog.ts` | Offices, categories, units, items, item type-ahead |
 | `dashboard.ts` | KPIs, pipeline, activity, top items, low stock |
@@ -581,12 +672,29 @@ work the server denies, which is the one thing this feed must never do. Now it c
 | `release` | `request.release` | `approved`, `partially_released` | own offices unless `request.view_all` |
 | `confirm` | `request.acknowledge` | releases `pending`, not released by me | own offices; scoped users only |
 | `pickup` | *(filer)* | `approved`, `partially_released` | `requested_by = me` |
+| `void` | *(news)* | `void` ledger rows, last 7 days | own offices; scoped users only |
 | `outcome` | *(filer)* | `rejected`, `released`, last 7 days | `requested_by = me` |
 
 `confirm` and `dispute` are keyed on **releases**, not requests, so unlike the others they
 can name a request another bucket also names. `buildFeed` discounts the overlap it can
 see; past the fetch window the badge can overcount by the collisions in the tail, which is
 the honest trade for not inventing a number.
+
+**`void` is keyed on the ledger** — it is the only bucket that is, and it has to be:
+nothing on `requests` records that a void happened, and `updated_at` cannot tell one from
+any other edit. It is scoped to the receiving office rather than the filer, so the supply
+officer *and* their head both learn that something the slip says was delivered has come
+back off their balance; without it the only trace on their side is a status quietly
+sliding from Released back to Partially Released, which nobody is watching for. Scoped
+users only, exactly like `confirm`: a void is GSO's own action, and telling the desk that
+performed it is an echo, not news.
+
+**News is a section, not a badge.** `NEWS_KINDS` (`void`, then `outcome`) is merged into
+one chronological `recent` list, deduped in that order *before* sorting — which is what
+makes the order a tie-break, so a slip both freshly voided and freshly released keeps the
+void, the more useful of the two things to be told. Several voided lines on one slip arrive
+as several ledger rows and collapse to one entry. None of it counts toward the badge, for
+the same reason outcomes never did.
 
 That reuse is load-bearing: a bell that drifted from its action would advertise work the
 server then refuses, which is worse than no bell.
@@ -633,6 +741,8 @@ drops the badge the moment you endorse something and land back on the list.
 15. `..._users_in_multiple_offices.sql` — `user_offices`, seeded from every profile's primary office. See **Office scope**
 16. `..._gso_checker_recommendation.sql` — the `recommended` status and action, `recommended_by`/`recommended_at`, `request_items.quantity_recommended` with the two ceilings as CHECK constraints, and the `gso_checker` role plus `request.recommend`. Requests already at `pending` are deliberately not backfilled — a recommendation nobody made is worse than a queue. Its closing `SELECT` reports how many slips are waiting to be checked against how many people can check them
 17. `..._endorsed_quantities.sql` — `request_items.quantity_endorsed`, and the checker's ceiling moves onto it (`COALESCE(quantity_endorsed, quantity_requested)`, so slips endorsed before this keep working). No backfill: NULL there means "endorsed as filed, before the head could say otherwise", which is the truth about those rows
+18. `..._void_release_enums.sql` — the `void` movement type and the `voided` action. Split from 19 for the reason 8 was split from 7 and 13 from 14: 19 writes both as literals inside a function body
+19. `..._void_release_line.sql` — `request_release_items.quantity_voided` with its ceiling as a CHECK, the `request.void_release` permission and its grants, `void_release_item`, and `office_stock_issued` replaced to net voids off the issued figure. No backfill — a void nobody performed is not a thing. Its closing `SELECT` reports which roles hold the permission and how many people are in them
 
 ### Types
 
@@ -646,6 +756,7 @@ npx supabase gen types typescript --project-id <id> --schema gso_inventory > src
 - `src/components/ui/` — shadcn primitives (do not hand-edit, with one exception below)
 - `src/components/layout/` — `AppSidebar`, `Topbar`, `NotificationBell`, `PageHeader`, `NavigationProgress`
 - `src/components/shared/` — `StatusBadge`, `MovementBadge`, `RequestStepper`, `TimelineLog`
+- `src/components/print/` — `sheet.tsx`: the A4 letterhead, `@page` rules and form primitives both printed routes share
 - `src/components/tables/` — the TanStack `DataTable` and its toolbar, faceted filter, pagination, sortable header, skeleton, and CSV export
 - `src/components/gso/` — `ItemLineEditor`, the item picker used by the new-request form
 
@@ -721,9 +832,9 @@ already and are not affected by the above.
 
 ### Route Structure
 
-All authenticated routes live under `/dashboard`, with one deliberate exception:
-`/print/delivery-receipt/[releaseId]`, which is outside it precisely so it gets none of
-this layout — see **The delivery receipt**. The dashboard layout is a **Server
+All authenticated routes live under `/dashboard`, with two deliberate exceptions:
+`/print/delivery-receipt/[releaseId]` and `/print/items-checklist/[id]`, outside it
+precisely so they get none of this layout — see **The printed forms**. The dashboard layout is a **Server
 Component**: it resolves `getSessionSnapshot()` once (redirecting to `/auth/signout` when
 that comes back empty — see **Auth Flow**) and hands it to `SessionProvider`
 (`src/lib/hooks/use-session.tsx`), which backs `useAuth`, `useProfile`, and

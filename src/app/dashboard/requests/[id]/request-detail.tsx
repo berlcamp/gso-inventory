@@ -41,6 +41,7 @@ import {
   AlertCircle,
   Check,
   ClipboardCheck,
+  ClipboardList,
   Loader2,
   PackageCheck,
   Pencil,
@@ -109,6 +110,15 @@ export function RequestDetail({
   // this stage carries someone else's number as a ceiling; see `updateRequest`.
   const isEditable =
     isAwaitingEndorsement && (can("request.create") || can("request.endorse"))
+  // The picking sheet opens once the office's own head has endorsed — which is
+  // the moment GSO first has any business with the slip at all. Terminal
+  // statuses are left out: a checklist for a rejected or withdrawn request
+  // sends someone to the shelves for nothing.
+  const isChecklistPrintable =
+    isPending ||
+    isRecommended ||
+    isReleasable ||
+    request.status === "released"
 
   return (
     <div className="space-y-6">
@@ -288,12 +298,37 @@ export function RequestDetail({
         {/* Line items */}
         <Card className="lg:col-span-2">
           <CardHeader className="border-b pb-4">
-            <CardTitle className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
-              Requested Items
-            </CardTitle>
-            <CardDescription>
-              {lines.length} item{lines.length === 1 ? "" : "s"}
-            </CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <CardTitle className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
+                  Requested Items
+                </CardTitle>
+                <CardDescription>
+                  {lines.length} item{lines.length === 1 ? "" : "s"}
+                </CardDescription>
+              </div>
+              {/* Its own tab, like the delivery receipt: printing must never
+                  take the custodian off the request they were working, and the
+                  sheet on screen is then the sheet that comes out of the
+                  printer with no app chrome around it. */}
+              {isChecklistPrintable && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  nativeButton={false}
+                  render={
+                    <a
+                      href={`/print/items-checklist/${request.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                >
+                  <ClipboardList className="h-3.5 w-3.5" />
+                  Items Checklist
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="pt-0">
             <Table>
